@@ -41,7 +41,7 @@ printf "${BOLD}║  POST-FLIGHT — Assessment III feature qualification    ║$
 printf "${BOLD}╚══════════════════════════════════════════════════════════╝${N}\n"
 echo "Each line is the FEATURE that earns the color (not only a file path)."
 echo "  ${G}GREEN${N}  = required feature built + exercised in start/stop"
-echo "  ${O}ORANGE${N} = bonus feature for extra credit"
+echo "  ${O}ORANGE${N} = bonus feature for extra credit (CLAIMED = present in this repo)"
 echo "  ${B}BLUE${N}   = TA can verify on GitHub without running the stack"
 echo "  ${R}RED${N}    = required feature missing or not demonstrable"
 echo "Repo: $ROOT"
@@ -123,21 +123,22 @@ else
   mark_red "Feature missing: DEA schedule guidance mode"
 fi
 
-# Bonus
-if grep -qiE 'langgraph|StateGraph' "$ROOT" --include='*.py' 2>/dev/null | head -1 >/dev/null; then
-  mark_orange "Bonus feature: LangGraph multi-agent / graph workflow orchestration"
+# Bonus — path-based detection (must match what we actually shipped)
+if has_file backend/agents/graph.py && grep -qE 'StateGraph|langgraph' "$ROOT/backend/agents/graph.py" 2>/dev/null; then
+  mark_orange "Bonus CLAIMED: LangGraph workflow — classify → Chroma tool → grounded answer (agents/graph.py)"
 else
-  mark_orange "Bonus feature not claimed: LangGraph workflows (optional extra credit)"
+  mark_orange "Bonus not claimed: LangGraph workflows (optional extra credit)"
 fi
-if grep -qiE 'langsmith|LANGCHAIN_TRACING' "$ROOT" --include='*.py' --include='*.env*' --include='*.md' 2>/dev/null | head -1 >/dev/null; then
-  mark_orange "Bonus feature: LangSmith observability / tracing"
+if has_file backend/agents/tracing.py && grep -qE 'LANGCHAIN_TRACING|configure_langsmith' "$ROOT/backend/agents/tracing.py" 2>/dev/null; then
+  mark_orange "Bonus CLAIMED: LangSmith observability hook (agents/tracing.py; set LANGCHAIN_TRACING_V2=true + API key)"
 else
-  mark_orange "Bonus feature not claimed: LangSmith observability (optional extra credit)"
+  mark_orange "Bonus not claimed: LangSmith observability (optional extra credit)"
 fi
-if grep -qiE 'autonomous.agent|AgentExecutor' "$ROOT" --include='*.py' 2>/dev/null | head -1 >/dev/null; then
-  mark_orange "Bonus feature: custom autonomous agent"
+if has_file backend/agents/graph.py && grep -qE 'PharmacyAgent|run_pharmacy_agent' "$ROOT/backend/agents/graph.py" 2>/dev/null \
+  && has_file backend/main.py && grep -q '/api/agent/chat' "$ROOT/backend/main.py" 2>/dev/null; then
+  mark_orange "Bonus CLAIMED: autonomous agent — POST /api/agent/chat routes imprint/DEA/general Chroma tools"
 else
-  mark_orange "Bonus feature not claimed: custom autonomous agents (optional extra credit)"
+  mark_orange "Bonus not claimed: custom autonomous agents (optional extra credit)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -192,19 +193,18 @@ else
   mark_red "Feature missing: orchestrated terraform destroy on stop"
 fi
 
-# Bonus TF
 if has_file terraform/free-tier.tfvars || grep -qiE 't3.micro|free.tier' "$ROOT/terraform/"*.tf* 2>/dev/null; then
-  mark_orange "Bonus feature: cost-aware defaults (free-tier-oriented instance/size choices)"
+  mark_orange "Bonus CLAIMED: cost-aware defaults (free-tier-oriented instance/size choices)"
 fi
-if grep -rqE 'backend "s3"|dynamodb_table' "$ROOT/terraform" 2>/dev/null; then
-  mark_orange "Bonus feature: remote Terraform state (S3/DynamoDB locking)"
+if grep -rqE 'backend[[:space:]]*"s3"|dynamodb_table' "$ROOT/terraform" --include='*.tf' 2>/dev/null; then
+  mark_orange "Bonus CLAIMED: remote Terraform state (S3/DynamoDB locking)"
 else
-  mark_orange "Bonus feature not claimed: remote state backend (local state used for demo)"
+  mark_orange "Bonus not claimed: remote state backend (local state used for demo — acceptable)"
 fi
 if find "$ROOT/terraform" -type d -name modules 2>/dev/null | grep -q .; then
-  mark_orange "Bonus feature: Terraform modules for reusable resource groups"
+  mark_orange "Bonus CLAIMED: Terraform modules for reusable resource groups"
 else
-  mark_orange "Bonus feature not claimed: Terraform modules / workspaces"
+  mark_orange "Bonus not claimed: Terraform modules / workspaces (optional; flat main.tf is fine for this demo)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -230,10 +230,10 @@ else
 fi
 
 if has_file .github/workflows/destroy.yml; then
-  mark_orange "Bonus feature: dedicated destroy workflow — cloud teardown triggerable from Actions UI"
+  mark_orange "Bonus CLAIMED: dedicated destroy workflow — cloud teardown triggerable from Actions UI"
   mark_blue "Feature (GitHub): destroy.yml visible to TAs in the Actions tab"
 else
-  mark_orange "Bonus feature not claimed: separate destroy workflow in GitHub Actions"
+  mark_orange "Bonus not claimed: separate destroy workflow in GitHub Actions"
 fi
 
 if has_file docker-compose.yml && has_file backend/Dockerfile && has_file frontend/Dockerfile; then
@@ -243,14 +243,17 @@ else
 fi
 
 if has_file backend/tests/test_integration_api.py || has_file backend/tests/test_expand_query.py; then
-  mark_orange "Bonus feature: Python test suite (unit + API integration with mocked RAG)"
+  mark_orange "Bonus CLAIMED: Python test suite (unit + API integration with mocked RAG)"
   mark_green "Feature: testable API contracts — health/chat/meds/dea covered by automated tests"
 else
   mark_red "Feature missing: automated backend tests"
 fi
 
 if has_file backend/tests/test_stress_api.py; then
-  mark_orange "Bonus feature: stress/load tests — concurrent API pressure beyond happy-path unit tests"
+  mark_orange "Bonus CLAIMED: stress/load tests — concurrent API pressure beyond happy-path unit tests"
+fi
+if has_file backend/tests/test_agent.py; then
+  mark_orange "Bonus CLAIMED: agent unit tests (intent routing + Chroma tools)"
 fi
 
 if has_file backend/.env.example; then
@@ -270,7 +273,7 @@ else
 fi
 
 if grep -qE 'openai|ChatOpenAI|bedrock' "$ROOT/backend/rag_service.py" 2>/dev/null; then
-  mark_orange "Bonus feature: optional cloud LLM provider path (OpenAI/Bedrock-style) beside Ollama"
+  mark_orange "Bonus CLAIMED: optional cloud LLM provider path (OpenAI/Bedrock-style) beside Ollama"
 fi
 
 if has_file backend/main.py && grep -qE '@app\.(post|get).*\/api\/' "$ROOT/backend/main.py" 2>/dev/null; then
@@ -286,19 +289,19 @@ else
 fi
 
 if has_file frontend/nginx.conf || has_file frontend/Dockerfile; then
-  mark_orange "Bonus feature: browser-reachable system UI — served on :3000 (local) and via ALB (cloud)"
+  mark_orange "Bonus CLAIMED: browser-reachable system UI — served on :3000 (local) and via ALB (cloud)"
 fi
 
 if has_dir docs/brand && find "$ROOT/docs/brand" -name '*.png' 2>/dev/null | grep -q .; then
-  mark_orange "Bonus feature: polished product branding — Sonoran Forge assets in the live UI"
+  mark_orange "Bonus CLAIMED: polished product branding — Sonoran Forge assets in the live UI"
 fi
 
 if grep -qE 'stream|text/event-stream|chat/stream' "$ROOT/backend/main.py" 2>/dev/null; then
-  mark_orange "Bonus feature: streaming responses (SSE) for lower perceived latency"
+  mark_orange "Bonus CLAIMED: streaming responses (SSE) for lower perceived latency"
 fi
 
 if has_file scripts/gpu_select.sh; then
-  mark_orange "Bonus feature: GPU detect + user choice with CPU fallback for faster local inference"
+  mark_orange "Bonus CLAIMED: GPU detect + user choice with CPU fallback for faster local inference"
 fi
 
 # ---------------------------------------------------------------------------
@@ -326,16 +329,19 @@ fi
 if has_file docs/postflight-rubric.md; then
   mark_blue "Feature (GitHub): rubric self-map — explicit checklist tying code to Assessment III scoring"
 fi
+if has_file docs/security.md; then
+  mark_blue "Feature (GitHub): security risks & mitigations (masked identity, gitignored secrets)"
+fi
 
 if has_file scripts/run.sh && has_file scripts/preflight.sh; then
-  mark_orange "Bonus feature: shell automation — one command preflight + start/stop instead of manual multi-step setup"
+  mark_orange "Bonus CLAIMED: shell automation — one command preflight + start/stop instead of manual multi-step setup"
   mark_green "Feature: repeatable local lifecycle — preflight gates failures before long Docker/AWS work"
 else
   mark_red "Feature missing: setup/teardown automation scripts"
 fi
 
 if has_file scripts/postflight.sh; then
-  mark_orange "Bonus feature: post-flight audit — after destroy, prove deliverables and teardown state for TAs"
+  mark_orange "Bonus CLAIMED: post-flight audit — after destroy, prove deliverables and teardown state for TAs"
 fi
 
 # ---------------------------------------------------------------------------
@@ -352,12 +358,11 @@ mark_green "Deliverable feature: automation scripts that reduce manual secret/se
 section "POST-FLIGHT SUMMARY"
 # ---------------------------------------------------------------------------
 printf "  ${G}GREEN  — required features covered${N}:     %s\n" "$EXISTS"
-printf "  ${O}ORANGE — bonus features${N}:              %s\n" "$BONUS"
+printf "  ${O}ORANGE — bonus features listed${N}:        %s\n" "$BONUS"
 printf "  ${B}BLUE   — GitHub-visible features${N}:      %s\n" "$GH"
 printf "  ${R}RED    — required features missing${N}:    %s\n" "$MISS"
 echo
-echo "Reminder: GREEN/ORANGE describe capabilities the demo must show;"
-echo "          BLUE describes artifacts scored by reading the repository."
+echo "CLAIMED bonuses are implemented in this repo. 'not claimed' = optional work we did not ship."
 echo
 
 if [[ "$MISS" -eq 0 ]]; then
