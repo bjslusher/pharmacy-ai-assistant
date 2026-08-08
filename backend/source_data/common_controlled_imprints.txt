@@ -1,0 +1,92 @@
+COMMON CONTROLLED SUBSTANCE IMPRINT EXAMPLES (Educational Seed Data for Pharmacy RAG)
+
+IMPORTANT DISCLAIMER
+These examples are for educational and demonstration purposes only. Imprint codes can change between manufacturers, reformulations, and over time. Always verify any identification with current official resources (DailyMed, manufacturer data, Drugs.com Pill Identifier, Poison Control, or institutional tools) and the judgment of a licensed pharmacist. This system is not a substitute for professional identification tools.
+
+============================================================
+SCHEDULE II – Opioids (high abuse potential, no refills under federal rules)
+============================================================
+
+Hydrocodone / Acetaminophen combinations (rescheduled to Schedule II)
+- M367 or M 367          → Hydrocodone bitartrate 10 mg / Acetaminophen 325 mg (common white oval)
+- M366 or M 366          → Hydrocodone 7.5 mg / Acetaminophen 325 mg
+- M365 or M 365          → Hydrocodone 5 mg / Acetaminophen 325 mg
+- Many other manufacturer-specific codes exist for the same strengths.
+
+Oxycodone (immediate-release and extended-release)
+- Common IR strengths often carry manufacturer codes such as:
+  - Various “K” series or numeric codes for 5 mg, 10 mg, 15 mg, 20 mg, 30 mg IR tablets
+- OxyContin (oxycodone extended-release) historically used “OC” followed by strength (e.g., OC 10, OC 20, OC 40, OC 80). Abuse-deterrent formulations have specific markings; always confirm current appearance.
+- Percocet (oxycodone + acetaminophen) products have manufacturer-specific imprints that vary by strength and maker.
+
+Other Schedule II opioids
+- Morphine sulfate IR and ER tablets carry manufacturer-specific imprints (many scored, various colors).
+- Fentanyl products are usually patches or lozenges rather than conventional tablets; tablet forms are less common and tightly controlled.
+- Methadone tablets are typically white or colored with manufacturer codes; strength must be confirmed carefully because of potency.
+
+Schedule II Stimulants
+- Adderall (mixed amphetamine salts)
+  - IR tablets often marked with “AD” + strength or manufacturer codes (e.g., AD 5, AD 10, AD 20, AD 30).
+  - XR capsules have different markings and colors by strength.
+- Methylphenidate (Ritalin, Concerta, generics)
+  - Concerta extended-release tablets historically used “alza” + strength (e.g., alza 18, alza 27, alza 36, alza 54).
+  - IR methylphenidate tablets have varied generic imprints.
+- Lisdexamfetamine (Vyvanse) is usually a capsule with strength-specific markings.
+
+============================================================
+SCHEDULE III
+============================================================
+
+- Buprenorphine / naloxone (Suboxone and generics) – usually sublingual films or tablets with manufacturer-specific imprints; Schedule III.
+- Products containing limited amounts of codeine (e.g., Tylenol with Codeine #3 ≈ 30 mg codeine) have manufacturer codes; Schedule III when within the federal quantity limits.
+- Anabolic steroids and certain other agents fall in Schedule III; tablet imprints vary widely.
+
+============================================================
+SCHEDULE IV – Benzodiazepines and related
+============================================================
+
+Alprazolam (Xanax and generics)
+- 0.25 mg, 0.5 mg, 1 mg, 2 mg strengths are very common.
+- Generics frequently use codes such as “G 1”, “G 0.5”, “GG” series, “R” series, or pure numeric codes depending on the manufacturer.
+- Shape is often rectangular or oval; color varies (white, peach, blue, etc.). Always confirm strength by imprint + color + shape together.
+
+Diazepam (Valium and generics)
+- Common strengths 2 mg, 5 mg, 10 mg.
+- Historic Roche markings and many generic codes (e.g., “TEVA”, “MYLAN”, numeric codes).
+- Often scored tablets.
+
+Lorazepam (Ativan and generics)
+- 0.5 mg, 1 mg, 2 mg common.
+- Manufacturer-specific imprints; many are white or pale-colored scored tablets.
+
+Clonazepam (Klonopin and generics)
+- 0.5 mg, 1 mg, 2 mg common.
+- Varied generic imprints; some are round, others have distinctive shapes.
+
+Other Schedule IV examples
+- Zolpidem (Ambien and generics) – IR and CR forms have different markings; Schedule IV.
+- Tramadol tablets (when scheduled as IV in the relevant jurisdiction) carry manufacturer codes; confirm local scheduling.
+
+============================================================
+IDENTIFICATION BEST PRACTICES FOR PHARMACY STAFF
+============================================================
+
+1. Record the exact imprint code (including spaces, dashes, logos).
+2. Note color, shape, scoring, and approximate size.
+3. Never rely on a single data point (imprint alone can collide across products).
+4. Cross-check at least two authoritative sources.
+5. Confirm the controlled-substance schedule and any state-specific restrictions.
+6. Document the identification process when the result will be used for dispensing or counseling.
+7. When the imprint is unknown or ambiguous, treat the tablet as unidentified and follow institutional protocol.
+
+============================================================
+LIMITATIONS OF THIS SEED FILE
+============================================================
+
+- This is a deliberately limited educational sample focused on commonly encountered controlled substances.
+- Thousands of imprint codes exist across manufacturers and strengths.
+- Codes change when manufacturers reformulate or change suppliers.
+- The archived NIH Pillbox dataset (retired 2021) and current DailyMed / openFDA labels contain additional historical and labeling data but are not a complete live substitute for commercial pill identifiers.
+- For any real-world identification, use current official or institutional tools and professional judgment.
+
+This file exists to ground the Pharmacy AI Assistant RAG system in realistic controlled-substance identification language and examples. It is not a comprehensive or authoritative imprint database.
