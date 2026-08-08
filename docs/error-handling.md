@@ -27,6 +27,20 @@ Most error responses look like:
 
 Set `DEBUG=true` on the backend to include stack traces in unhandled 500 responses (**dev only**).
 
+## Frontend display
+
+The React UI (`frontend/src/apiErrors.js` + `App.jsx`) parses this envelope and shows:
+
+| UI element | Source |
+|------------|--------|
+| Badge **code** | `error.code` (or inferred `HTTP_*` / `NETWORK_ERROR`) |
+| **HTTP status** | response status |
+| Message | `error.message` or top-level `detail` |
+| Collapsible **Technical detail** | `error.detail` |
+| **Hint** panel | `error.hint` or status-based default |
+
+Network failures (backend down, timeout) use code `NETWORK_ERROR` and a runbook-style hint (`run.sh status`, health URL).
+
 ## HTTP status map
 
 | Status | Typical cause |
@@ -64,15 +78,15 @@ Mem0 failures are **non-fatal** (logged, request continues).
 
 | Situation | Behavior |
 |-----------|----------|
+| Preflight fail | Exit 1 with `[FAIL]` lines before Docker/AWS long work |
 | Docker missing | Exit 1 with install hint |
-| Compose missing | Exit 1 with install hint |
 | Backend health timeout | Warning (does not kill containers); use `logs` / `status` |
 | Model pull failure | Warning; retry with `docker compose exec ollama ollama pull ...` |
-| Unknown subcommand | Exit 1 + usage |
 
 ## Client checklist
 
 1. On **422** — fix payload (`message`, `mode`).  
 2. On **503** — run `bash scripts/run.sh status` and ensure Ollama models exist.  
 3. On **500** — check container logs: `bash scripts/run.sh logs`.  
-4. Prefer `error.code` over parsing free-text `detail` strings.
+4. Prefer `error.code` over parsing free-text `detail` strings.  
+5. In the UI, read the **code badge** + **Hint** panel first.

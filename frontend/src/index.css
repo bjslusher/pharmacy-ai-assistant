@@ -13,6 +13,8 @@
   --adobe: #904d2b;
   --danger-bg: #2a1814;
   --danger-border: #8a3030;
+  --danger-text: #f0b4a8;
+  --danger-code-bg: #3a2020;
 }
 
 * {
@@ -158,6 +160,88 @@ body {
   background: var(--surface-raised);
   border: 1px solid var(--border);
   color: var(--text);
+}
+
+.msg.bot.is-error {
+  border-color: var(--danger-border);
+  background: var(--danger-bg);
+  white-space: normal;
+}
+
+/* Structured API error panel */
+.api-error {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  font-size: 0.9rem;
+}
+
+.api-error-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.api-error-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--danger-text);
+  background: var(--danger-code-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: 4px;
+  padding: 0.15rem 0.45rem;
+}
+
+.api-error-status {
+  font-size: 0.72rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.api-error-message {
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.api-error-detail {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.api-error-detail summary {
+  cursor: pointer;
+  color: var(--gold);
+  user-select: none;
+}
+
+.api-error-detail pre {
+  margin-top: 0.35rem;
+  padding: 0.5rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.api-error-hint {
+  font-size: 0.8rem;
+  color: var(--gold);
+  background: rgba(232, 189, 121, 0.08);
+  border: 1px solid rgba(232, 189, 121, 0.35);
+  border-radius: 6px;
+  padding: 0.45rem 0.55rem;
+  line-height: 1.4;
+}
+
+.api-error-hint strong {
+  color: var(--accent);
 }
 
 .input-row {
