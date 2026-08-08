@@ -10,7 +10,7 @@ import os
 import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Optional
+from typing import Annotated, Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -30,16 +30,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("pharmacy-ai")
 
-rag: Optional[PharmacyRAG] = None
-_startup_error: Optional[str] = None
+rag: PharmacyRAG | None = None
+_startup_error: str | None = None
 
 
 def _error_body(
     *,
     code: str,
     message: str,
-    detail: Optional[str] = None,
-    hint: Optional[str] = None,
+    detail: str | None = None,
+    hint: str | None = None,
     status_code: int = 500,
 ) -> dict[str, Any]:
     body: dict[str, Any] = {
@@ -158,7 +158,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     user_id: str = Field(default="default-user")
-    session_id: Optional[str] = None
+    session_id: str | None = None
     mode: str = Field(default="general", description="general | med_id | dea")
 
     @field_validator("message")
@@ -191,7 +191,7 @@ class HealthResponse(BaseModel):
     status: str
     documents_indexed: int
     llm_provider: str
-    startup_error: Optional[str] = None
+    startup_error: str | None = None
 
 
 def _require_rag() -> PharmacyRAG:
@@ -275,7 +275,7 @@ def _path_suffix(name: str) -> str:
 
 
 @app.post("/api/ingest")
-async def ingest(file: UploadFile = File(...)):
+async def ingest(file: Annotated[UploadFile, File()]):
     service = _require_rag()
     filename = file.filename or "upload.txt"
     suffix = _path_suffix(filename)

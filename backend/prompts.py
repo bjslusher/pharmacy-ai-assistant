@@ -1,6 +1,7 @@
 """Pharmacy-specific prompt templates for medication identification and DEA regulations."""
 
 import re
+
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 
 SYSTEM_PHARMACY = """You are a knowledgeable, careful Pharmacy Assistant AI specializing in medication identification and DEA (Drug Enforcement Administration) controlled substance regulations.

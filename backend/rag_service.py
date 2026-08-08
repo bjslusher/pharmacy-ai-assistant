@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-import os
 import logging
+import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
-from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from langchain_ollama import ChatOllama, OllamaEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from prompts import RAG_PROMPT, MED_ID_PROMPT, DEA_QUERY_PROMPT
+from prompts import DEA_QUERY_PROMPT, MED_ID_PROMPT, RAG_PROMPT
 
 logger = logging.getLogger("pharmacy-rag")
 
@@ -32,7 +32,7 @@ class RAGServiceError(Exception):
         message: str,
         *,
         code: str = "RAG_ERROR",
-        detail: Optional[str] = None,
+        detail: str | None = None,
         http_status: int = 500,
     ):
         super().__init__(message)
@@ -56,7 +56,7 @@ class PharmacyRAG:
                 detail=str(e),
                 http_status=503,
             ) from e
-        self.vectorstore: Optional[Chroma] = None
+        self.vectorstore: Chroma | None = None
         self.mem0 = self._init_mem0()
         self.splitter = RecursiveCharacterTextSplitter(
             chunk_size=CHUNK_SIZE,
@@ -155,8 +155,8 @@ class PharmacyRAG:
                 http_status=503,
             ) from e
 
-    def _load_source_docs(self) -> List[Document]:
-        docs: List[Document] = []
+    def _load_source_docs(self) -> list[Document]:
+        docs: list[Document] = []
         for base in [
             DATA_PATH,
             Path("source_data"),
@@ -270,7 +270,7 @@ class PharmacyRAG:
                 http_status=500,
             ) from e
 
-    def _retrieve(self, query: str, k: int = 6) -> List[Document]:
+    def _retrieve(self, query: str, k: int = 6) -> list[Document]:
         if not self.vectorstore:
             return []
         try:
@@ -288,9 +288,9 @@ class PharmacyRAG:
         self,
         question: str,
         user_id: str = "default",
-        session_id: Optional[str] = None,
+        session_id: str | None = None,
         mode: str = "general",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         if not question or not str(question).strip():
             raise RAGServiceError(
                 "Empty question",
