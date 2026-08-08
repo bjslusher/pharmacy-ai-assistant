@@ -228,15 +228,31 @@ def _require_rag() -> PharmacyRAG:
     return rag
 
 
+def _safe_chroma_status(service: Any) -> dict[str, Any] | None:
+    """Return a real dict for HealthResponse.chroma (MagicMock is not a dict)."""
+    if service is None:
+        return None
+    try:
+        raw = service.index_status()
+    except Exception as e:
+        return {"ready": False, "error": str(e)}
+    if isinstance(raw, dict):
+        return raw
+    # Mock objects / unexpected types → safe summary
+    try:
+        count = int(service.document_count())
+    except Exception:
+        count = 0
+    return {
+        "ready": count > 0,
+        "documents_indexed": count,
+        "collection": "pharmacy_docs",
+        "note": "index_status unavailable; using document_count fallback",
+    }
+
+
 def _health_payload() -> HealthResponse:
     status = "healthy" if rag is not None else "degraded"
-    chroma = None
-    if rag is not None:
-        try:
-            chroma = rag.index_status()
-        except Exception as e:
-            logger.debug("index_status failed: %s", e)
-            chroma = {"ready": False, "error": str(e)}
     return HealthResponse(
         status=status,
         documents_indexed=rag.document_count() if rag else 0,
@@ -244,7 +260,7 @@ def _health_payload() -> HealthResponse:
         ollama_model=os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
         rag_top_k=int(os.getenv("RAG_TOP_K", "3")),
         startup_error=_startup_error,
-        chroma=chroma,
+        chroma=_safe_chroma_status(rag),
     )
 
 
@@ -435,11 +451,6 @@ def stats():
     service = _require_rag()
     from agents.tracing import configure_langsmith
 
-    chroma = None
-    try:
-        chroma = service.index_status()
-    except Exception:
-        chroma = None
     return {
         "documents": service.document_count(),
         "provider": os.getenv("LLM_PROVIDER", "ollama"),
@@ -447,7 +458,7 @@ def stats():
         "rag_top_k": int(os.getenv("RAG_TOP_K", "3")),
         "mem0_enabled": bool(os.getenv("MEM0_API_KEY")),
         "startup_error": _startup_error,
-        "chroma": chroma,
+        "chroma": _safe_chroma_status(service),
         "agent": {
             "endpoint": "/api/agent/chat",
             "tools": ["search_imprints", "search_dea", "search_general"],

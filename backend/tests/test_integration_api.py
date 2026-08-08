@@ -1,8 +1,6 @@
 """
 Integration tests: FastAPI TestClient + fully mocked PharmacyRAG.
 Covers /api/chat, /api/meds/identify, /api/dea/query, health, validation, 503, ingest.
-
-Heavy LLM/vector deps are stubbed so CI does not need Ollama or Chroma.
 """
 
 from __future__ import annotations
@@ -13,10 +11,6 @@ from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# ---------------------------------------------------------------------------
-# Stub heavy optional deps BEFORE importing main / rag_service (CI-friendly)
-# ---------------------------------------------------------------------------
 
 
 def _stub(name: str) -> ModuleType:
@@ -39,6 +33,8 @@ for mod_name in [
     "chromadb",
     "mem0",
     "pypdf",
+    "langgraph",
+    "langgraph.graph",
 ]:
     _stub(mod_name)
 
@@ -70,6 +66,14 @@ def _make_mock_rag(
     rag = MagicMock()
     rag.document_count.return_value = 3
     rag.ensure_index = MagicMock()
+    rag.index_status.return_value = {
+        "path": "/tmp/chroma_db",
+        "documents_indexed": 3,
+        "sources": ["dea_schedules_overview.txt", "common_controlled_imprints.txt"],
+        "embedding_model": "nomic-embed-text",
+        "collection": "pharmacy_docs",
+        "ready": True,
+    }
     rag.query.return_value = {
         "answer": answer,
         "sources": sources if sources is not None else ["dea_schedules_overview.txt"],
@@ -110,6 +114,7 @@ class TestHealth:
         data = r.json()
         assert data["status"] == "healthy"
         assert data["documents_indexed"] == 3
+        assert data.get("chroma") is None or isinstance(data.get("chroma"), dict)
 
     def test_api_health_alias(self, client) -> None:
         c, _ = client
