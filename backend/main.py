@@ -7,39 +7,85 @@ from __future__ import annotations
 
 import os
 import logging
-from typing import List, Optional
+import traceback
+from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 
 load_dotenv()
 
 from prompts import expand_query
-from rag_service import PharmacyRAG
+from rag_service import PharmacyRAG, RAGServiceError
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
 logger = logging.getLogger("pharmacy-ai")
 
 rag: Optional[PharmacyRAG] = None
+_startup_error: Optional[str] = None
+
+
+def _error_body(
+    *,
+    code: str,
+    message: str,
+    detail: Optional[str] = None,
+    hint: Optional[str] = None,
+    status_code: int = 500,
+) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        "error": {
+            "code": code,
+            "message": message,
+            "status": status_code,
+        }
+    }
+    if detail:
+        body["error"]["detail"] = detail
+    if hint:
+        body["error"]["hint"] = hint
+    # Keep FastAPI-style top-level detail for older clients/tests
+    body["detail"] = message if not detail else f"{message}: {detail}"
+    return body
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global rag
+    global rag, _startup_error
     logger.info("Initializing Pharmacy RAG service...")
-    rag = PharmacyRAG()
-    rag.ensure_index()
-    logger.info("RAG ready. Documents indexed: %s", rag.document_count())
+    try:
+        rag = PharmacyRAG()
+        rag.ensure_index()
+        count = rag.document_count()
+        logger.info("RAG ready. Documents indexed: %s", count)
+        if count == 0:
+            logger.warning(
+                "No documents indexed. Add files under backend/source_data/ "
+                "or POST /api/ingest. Answers may be low-quality until then."
+            )
+        _startup_error = None
+    except Exception as e:
+        _startup_error = str(e)
+        logger.exception("RAG startup failed: %s", e)
+        rag = None
     yield
     logger.info("Shutting down.")
 
 
 app = FastAPI(
     title="Pharmacy AI Assistant",
-    description="Medication identification and DEA regulations assistant (Assessment III). Educational use only.",
+    description=(
+        "Medication identification and DEA regulations assistant (Assessment III). "
+        "Educational use only. Errors return structured JSON with code, message, detail, hint."
+    ),
     version="1.0.0",
     lifespan=lifespan,
 )
@@ -51,6 +97,61 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = exc.errors()
+    logger.warning("Validation error on %s: %s", request.url.path, errors)
+    return JSONResponse(
+        status_code=422,
+        content=_error_body(
+            code="VALIDATION_ERROR",
+            message="Request validation failed",
+            detail=str(errors),
+            hint="Check message (1–4000 chars, non-blank) and mode (general|med_id|dea).",
+            status_code=422,
+        ),
+    )
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    code_map = {
+        400: "BAD_REQUEST",
+        404: "NOT_FOUND",
+        413: "PAYLOAD_TOO_LARGE",
+        503: "SERVICE_UNAVAILABLE",
+        500: "INTERNAL_ERROR",
+    }
+    code = code_map.get(exc.status_code, f"HTTP_{exc.status_code}")
+    detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=_error_body(
+            code=code,
+            message=detail,
+            status_code=exc.status_code,
+        ),
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error on %s: %s", request.url.path, exc)
+    detail = str(exc)
+    if os.getenv("DEBUG", "").lower() in {"1", "true", "yes"}:
+        detail = f"{detail}\n{traceback.format_exc()}"
+    return JSONResponse(
+        status_code=500,
+        content=_error_body(
+            code="INTERNAL_ERROR",
+            message="Unexpected server error",
+            detail=detail,
+            hint="Check backend logs. Set DEBUG=true for stack traces (dev only).",
+            status_code=500,
+        ),
+    )
 
 
 class ChatRequest(BaseModel):
@@ -89,13 +190,31 @@ class HealthResponse(BaseModel):
     status: str
     documents_indexed: int
     llm_provider: str
+    startup_error: Optional[str] = None
+
+
+def _require_rag() -> PharmacyRAG:
+    if rag is None:
+        hint = (
+            "Backend started but RAG failed to initialize. "
+            "Check Ollama is running and models are pulled (bash scripts/run.sh)."
+        )
+        if _startup_error:
+            hint = f"{hint} Startup error: {_startup_error}"
+        raise HTTPException(
+            status_code=503,
+            detail=f"RAG service not ready. {hint}",
+        )
+    return rag
 
 
 def _health_payload() -> HealthResponse:
+    status = "healthy" if rag is not None else "degraded"
     return HealthResponse(
-        status="healthy",
+        status=status,
         documents_indexed=rag.document_count() if rag else 0,
         llm_provider=os.getenv("LLM_PROVIDER", "ollama"),
+        startup_error=_startup_error,
     )
 
 
@@ -107,11 +226,10 @@ def health():
 
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest):
-    if not rag:
-        raise HTTPException(503, "RAG service not ready")
+    service = _require_rag()
     try:
         expanded = expand_query(req.message)
-        result = rag.query(
+        result = service.query(
             question=expanded,
             user_id=req.user_id,
             session_id=req.session_id,
@@ -122,14 +240,21 @@ def chat(req: ChatRequest):
             sources=result.get("sources", []),
             mode=req.mode,
         )
+    except RAGServiceError as e:
+        logger.warning("RAG service error [%s]: %s", e.code, e)
+        raise HTTPException(
+            status_code=e.http_status,
+            detail=f"Query failed: {e.message}" + (f" ({e.detail})" if e.detail else ""),
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Chat error")
-        raise HTTPException(500, f"Query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
 
 @app.post("/api/meds/identify", response_model=ChatResponse)
 def identify_medication(req: ChatRequest):
-    # Force med_id mode without mutating caller unexpectedly beyond this request
     forced = req.model_copy(update={"mode": "med_id"})
     return chat(forced)
 
@@ -140,30 +265,68 @@ def dea_query(req: ChatRequest):
     return chat(forced)
 
 
+ALLOWED_UPLOAD_SUFFIXES = {".txt", ".md", ".pdf"}
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
+
+
 @app.post("/api/ingest")
 async def ingest(file: UploadFile = File(...)):
-    if not rag:
-        raise HTTPException(503, "RAG not ready")
+    service = _require_rag()
+    filename = file.filename or "upload.txt"
+    suffix = Path_suffix(filename)
+    if suffix not in ALLOWED_UPLOAD_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Unsupported file type '{suffix}'. "
+                f"Allowed: {sorted(ALLOWED_UPLOAD_SUFFIXES)}"
+            ),
+        )
     content = await file.read()
     if not content:
-        raise HTTPException(400, "Empty file")
-    path = rag.save_upload(file.filename or "upload.txt", content)
-    count = rag.ingest_file(path)
-    return {"status": "ok", "chunks_added": count, "filename": file.filename}
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File exceeds max size of {MAX_UPLOAD_BYTES} bytes",
+        )
+    try:
+        path = service.save_upload(filename, content)
+        count = service.ingest_file(path)
+        if count == 0:
+            return {
+                "status": "warning",
+                "chunks_added": 0,
+                "filename": filename,
+                "message": "File saved but produced no indexable chunks (empty or unreadable).",
+            }
+        return {"status": "ok", "chunks_added": count, "filename": filename}
+    except RAGServiceError as e:
+        raise HTTPException(status_code=e.http_status, detail=e.message)
+    except Exception as e:
+        logger.exception("Ingest failed for %s", filename)
+        raise HTTPException(status_code=500, detail=f"Ingest failed: {e}")
+
+
+def Path_suffix(name: str) -> str:
+    from pathlib import Path as _P
+
+    return _P(name).suffix.lower()
 
 
 @app.get("/api/stats")
 def stats():
-    if not rag:
-        raise HTTPException(503, "RAG not ready")
+    service = _require_rag()
     return {
-        "documents": rag.document_count(),
+        "documents": service.document_count(),
         "provider": os.getenv("LLM_PROVIDER", "ollama"),
         "mem0_enabled": bool(os.getenv("MEM0_API_KEY")),
+        "startup_error": _startup_error,
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
