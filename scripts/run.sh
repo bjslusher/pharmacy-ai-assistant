@@ -5,6 +5,7 @@
 #   bash scripts/run.sh full [--yes]   # preflight all → Docker → AWS plan+apply
 #   bash scripts/run.sh                # local Docker only
 #   bash scripts/run.sh stop [--yes]   # sequential shutdown: Docker → AWS destroy
+#   bash scripts/run.sh test           # venv + pytest (unit/integration/stress)
 # =============================================================================
 set -euo pipefail
 
@@ -160,7 +161,6 @@ has_terraform_state() {
   [[ -f "$ROOT/terraform/terraform.tfstate" ]] && [[ -s "$ROOT/terraform/terraform.tfstate" ]]
 }
 
-# Read AWS frontend URL from terraform outputs (empty if not applied)
 aws_frontend_url() {
   if [[ -d "$ROOT/terraform" ]] && command -v terraform >/dev/null 2>&1; then
     (cd "$ROOT/terraform" && terraform output -raw frontend_url 2>/dev/null) || true
@@ -333,20 +333,46 @@ cmd_logs() {
   "${COMPOSE[@]}" logs -f --tail=200
 }
 
+# Create backend/.venv, install test deps, run full pytest suite
 cmd_test() {
+  ui_banner "BACKEND TESTS"
   run_preflight local || true
-  ui_section "Backend tests"
-  if [[ -d backend/.venv ]]; then
-    # shellcheck disable=SC1091
-    source backend/.venv/bin/activate
+
+  ui_section "Python venv"
+  if [[ ! -d "$ROOT/backend/.venv" ]]; then
+    ui_wait "python3 -m venv backend/.venv"
+    python3 -m venv "$ROOT/backend/.venv"
+    ui_ok "venv created: backend/.venv"
+  else
+    ui_ok "venv exists: backend/.venv"
   fi
+
+  # shellcheck disable=SC1091
+  source "$ROOT/backend/.venv/bin/activate"
+  PY="$ROOT/backend/.venv/bin/python"
+  PIP="$ROOT/backend/.venv/bin/pip"
+
+  ui_section "Install test dependencies"
+  "$PIP" install -q --upgrade pip
+  # Lightweight set enough for unit/integration/stress (mocked RAG)
+  "$PIP" install -q \
+    "fastapi==0.115.0" \
+    "uvicorn[standard]==0.30.6" \
+    "pydantic>=2.9.2,<3" \
+    "python-multipart==0.0.9" \
+    "httpx>=0.27.2,<0.29" \
+    "pytest>=8.3.3" \
+    "langchain-core>=0.3.6,<0.4"
+  ui_ok "pytest + fastapi + langchain-core installed in venv"
+
+  ui_section "Run pytest"
   (
-    cd backend
+    cd "$ROOT/backend"
     export PYTHONPATH=.
-    python3 -m pip install -q -r requirements.txt pytest python-multipart 2>/dev/null || true
-    python3 -m pytest -q tests/test_expand_query.py tests/test_api_models.py tests/test_rag_helpers.py tests/test_integration_api.py
+    "$PY" -m pytest -q tests/ \
+      --tb=short
   )
-  ui_ok "pytest finished"
+  ui_ok "all tests finished"
 }
 
 cmd_aws() {
@@ -366,7 +392,7 @@ cmd_preflight() {
 }
 
 usage() {
-  sed -n '2,10p' "$0"
+  sed -n '2,11p' "$0"
 }
 
 ARGS=()
