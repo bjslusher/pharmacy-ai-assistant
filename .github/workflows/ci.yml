@@ -22,15 +22,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
+          pip install pytest python-multipart
       - name: Syntax check
         run: python -m py_compile main.py prompts.py rag_service.py
       - name: Unit tests
         run: |
-          # No live Ollama required — expand_query + model tests are pure unit tests
           pytest -q tests/test_expand_query.py tests/test_api_models.py
-          # RAG helpers mock embeddings/LLM
           pytest -q tests/test_rag_helpers.py
+      - name: Integration tests (mocked RAG)
+        run: pytest -q tests/test_integration_api.py
 
   frontend:
     name: Frontend build
