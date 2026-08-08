@@ -5,12 +5,14 @@
 #   bash scripts/run.sh full [--yes]   # preflight all → Docker → AWS plan+apply
 #   bash scripts/run.sh                # local Docker only
 #   bash scripts/run.sh stop [--yes]   # sequential shutdown: Docker → AWS destroy
-#   bash scripts/run.sh aws preflight|plan|apply|destroy
 # =============================================================================
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+# shellcheck disable=SC1091
+source "$ROOT/scripts/status_ui.sh"
 
 COMPOSE=(docker compose)
 if ! docker compose version >/dev/null 2>&1; then
@@ -37,7 +39,7 @@ done
 run_preflight() {
   local mode="${1:-local}"
   if [[ ! -f "$ROOT/scripts/preflight.sh" ]]; then
-    echo "ERROR: missing scripts/preflight.sh" >&2
+    ui_fail "scripts/preflight.sh missing"
     exit 1
   fi
   bash "$ROOT/scripts/preflight.sh" "$mode"
@@ -47,194 +49,281 @@ ensure_env() {
   if [[ ! -f backend/.env ]]; then
     if [[ -f backend/.env.example ]]; then
       cp backend/.env.example backend/.env
-      echo "Created backend/.env from .env.example"
+      ui_ok "backend/.env created from .env.example"
     else
       echo "LLM_PROVIDER=ollama" > backend/.env
-      echo "Created minimal backend/.env"
+      ui_ok "backend/.env created (minimal)"
     fi
+  else
+    ui_ok "backend/.env present"
   fi
 }
 
 wait_http() {
   local url="$1" name="$2" tries="${3:-60}"
-  echo -n "Waiting for $name ($url)"
+  ui_wait "$name  $url"
   for ((i = 1; i <= tries; i++)); do
     if curl -sf "$url" >/dev/null 2>&1; then
-      echo " — ready"
+      ui_ok "$name healthy"
       return 0
     fi
-    echo -n "."
     sleep 2
   done
-  echo
-  echo "WARNING: $name did not become ready in time" >&2
+  ui_fail "$name not healthy after $((tries * 2))s"
+  return 1
+}
+
+container_running() {
+  local name="$1"
+  "${COMPOSE[@]}" ps --status running 2>/dev/null | grep -qi "$name"
+}
+
+report_docker_components_up() {
+  ui_section "Docker components"
+  local any_fail=0
+  if container_running ollama; then
+    ui_ok "ollama          container running (:11434)"
+  else
+    ui_fail "ollama          not running"
+    any_fail=1
+  fi
+  if container_running backend; then
+    ui_ok "backend         container running (:8000)"
+  else
+    ui_fail "backend         not running"
+    any_fail=1
+  fi
+  if container_running frontend; then
+    ui_ok "frontend        container running (:3000)"
+  else
+    ui_fail "frontend        not running"
+    any_fail=1
+  fi
+  if curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
+    ui_ok "API health      $HEALTH_URL"
+  else
+    ui_warn "API health      not ready yet (models may still be loading)"
+  fi
+  if curl -sf "$FRONTEND_URL" >/dev/null 2>&1; then
+    ui_ok "UI reachable    $FRONTEND_URL"
+  else
+    ui_warn "UI reachable    $FRONTEND_URL not responding yet"
+  fi
+  return "$any_fail"
+}
+
+report_docker_components_down() {
+  ui_section "Docker components (expect stopped)"
+  local left
+  left="$("${COMPOSE[@]}" ps -q 2>/dev/null || true)"
+  if [[ -z "${left}" ]]; then
+    ui_down "compose project   no running containers"
+    ui_down "ollama"
+    ui_down "backend"
+    ui_down "frontend"
+    return 0
+  fi
+  ui_fail "some containers still running:"
+  "${COMPOSE[@]}" ps || true
   return 1
 }
 
 pull_models() {
-  echo "=== Pulling Ollama models (if needed): $OLLAMA_MODEL, $OLLAMA_EMBED_MODEL ==="
-  if "${COMPOSE[@]}" ps --status running 2>/dev/null | grep -q ollama; then
-    "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_MODEL" || true
-    "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_EMBED_MODEL" || true
-  elif command -v ollama >/dev/null 2>&1; then
-    ollama pull "$OLLAMA_MODEL" || true
-    ollama pull "$OLLAMA_EMBED_MODEL" || true
+  ui_section "Ollama models"
+  if container_running ollama; then
+    ui_wait "pull $OLLAMA_MODEL"
+    if "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_MODEL"; then
+      ui_ok "model $OLLAMA_MODEL"
+    else
+      ui_warn "model $OLLAMA_MODEL pull failed (retry later)"
+    fi
+    ui_wait "pull $OLLAMA_EMBED_MODEL"
+    if "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_EMBED_MODEL"; then
+      ui_ok "model $OLLAMA_EMBED_MODEL"
+    else
+      ui_warn "model $OLLAMA_EMBED_MODEL pull failed"
+    fi
   else
-    echo "  docker compose exec ollama ollama pull $OLLAMA_MODEL"
+    ui_warn "ollama not running — skip model pull"
   fi
 }
 
 require_compose() {
   if [[ ${#COMPOSE[@]} -eq 0 ]]; then
-    echo "ERROR: Docker Compose not available" >&2
+    ui_fail "Docker Compose not available"
     exit 1
   fi
+  ui_ok "Docker Compose available"
 }
 
 has_terraform_state() {
-  [[ -f "$ROOT/terraform/terraform.tfstate" ]] || [[ -d "$ROOT/terraform/.terraform" ]]
+  [[ -f "$ROOT/terraform/terraform.tfstate" ]] && [[ -s "$ROOT/terraform/terraform.tfstate" ]]
 }
 
 print_local_banner() {
   echo
-  echo "=============================================="
-  echo "  LOCAL STACK"
+  echo -e "${C_BOLD}  LOCAL STACK${C_RST}"
   echo "  Frontend:  $FRONTEND_URL"
   echo "  Backend:   $BACKEND_URL/docs"
   echo "  Health:    $HEALTH_URL"
-  echo "=============================================="
 }
 
 print_aws_banner() {
   echo
-  echo "=============================================="
-  echo "  AWS (Terraform outputs)"
+  echo -e "${C_BOLD}  AWS / Terraform outputs${C_RST}"
   if [[ -d "$ROOT/terraform" ]] && command -v terraform >/dev/null 2>&1; then
     (cd "$ROOT/terraform" && terraform output 2>/dev/null) || echo "  (no outputs yet)"
   fi
-  echo "=============================================="
+}
+
+start_local_stack() {
+  ui_banner "STARTUP — Local Docker"
+  ui_section "Preflight"
+  run_preflight local
+  ui_ok "local preflight passed"
+
+  require_compose
+  ensure_env
+
+  ui_section "Compose build & start"
+  if "${COMPOSE[@]}" up --build -d; then
+    ui_ok "docker compose up --build -d"
+  else
+    ui_fail "docker compose up failed"
+    exit 1
+  fi
+
+  sleep 4
+  pull_models || true
+
+  ui_section "Health checks"
+  wait_http "$HEALTH_URL" "backend API" 45 || true
+  wait_http "$FRONTEND_URL" "frontend UI" 20 || true
+
+  report_docker_components_up || true
+  print_local_banner
 }
 
 cmd_start() {
-  echo "=== STAGE 1/1 — Local Docker ==="
-  run_preflight local
-  echo
-  require_compose
-  ensure_env
-  echo "=== Building and starting containers ==="
-  "${COMPOSE[@]}" up --build -d
-  echo "=== Waiting for services ==="
-  sleep 5
-  pull_models || true
-  wait_http "$HEALTH_URL" "backend" 45 || true
-  print_local_banner
-  echo "Full system (Docker + AWS ALB/ASG):  bash scripts/run.sh full"
-  echo "Stop everything:                     bash scripts/run.sh stop"
+  start_local_stack
+  ui_summary_box "STARTUP" \
+    "${C_OK}✔${C_RST} Docker: ollama / backend / frontend" \
+    "${C_OK}✔${C_RST} Local URLs printed above" \
+    "${C_DIM}–${C_RST} AWS not started (use: bash scripts/run.sh full)"
+  echo "Stop everything:  bash scripts/run.sh stop"
 }
 
 cmd_full() {
-  echo "=== Pharmacy AI — FULL SYSTEM (local Docker + AWS ALB/ASG) ==="
-  echo
+  ui_banner "STARTUP — Full system (Docker + AWS)"
 
-  echo "=== STAGE 1/4 — Preflight (local + AWS) ==="
+  ui_section "Stage 1/4 — Preflight (local + AWS)"
   run_preflight all
-  echo
+  ui_ok "preflight all passed"
 
-  echo "=== STAGE 2/4 — Local Docker stack ==="
+  ui_section "Stage 2/4 — Local Docker"
   require_compose
   ensure_env
-  "${COMPOSE[@]}" up --build -d
-  sleep 5
+  if "${COMPOSE[@]}" up --build -d; then
+    ui_ok "docker compose up"
+  else
+    ui_fail "docker compose up failed"
+    exit 1
+  fi
+  sleep 4
   pull_models || true
-  wait_http "$HEALTH_URL" "backend" 45 || true
+  wait_http "$HEALTH_URL" "backend API" 45 || true
+  report_docker_components_up || true
   print_local_banner
-  echo
 
-  echo "=== STAGE 3/4 — AWS Terraform plan (S3 + ASG + ALB) ==="
+  ui_section "Stage 3/4 — Terraform plan"
   bash "$ROOT/scripts/aws_up.sh" plan
-  echo
+  ui_ok "terraform plan finished"
 
-  echo "=== STAGE 4/4 — AWS Terraform apply ==="
+  ui_section "Stage 4/4 — Terraform apply (S3, IAM, ALB, ASG)"
   if [[ "$FULL_YES" -eq 1 ]] || [[ "${RUN_FULL_YES:-}" == "1" ]]; then
     bash "$ROOT/scripts/aws_up.sh" apply
   else
-    echo "Creates S3, IAM, ALB, ASG (1–2× EC2). Type yes to continue:"
+    echo "Creates S3, IAM, ALB, ASG. Type yes to continue:"
     read -r ans || true
     if [[ "${ans}" == "yes" ]]; then
       bash "$ROOT/scripts/aws_up.sh" apply
     else
-      echo "Apply skipped. Local stack is still running."
+      ui_skip "AWS apply (local Docker still up)"
       print_local_banner
       return 0
     fi
   fi
 
-  print_local_banner
   print_aws_banner
-  echo
-  echo "Local:  $FRONTEND_URL"
-  echo "AWS:    use terraform output frontend_url / health_url (ALB DNS)"
-  echo "        First ASG instance needs 15–25+ min for user_data + health checks"
-  echo "Stop:   bash scripts/run.sh stop --yes"
+  ui_summary_box "STARTUP" \
+    "${C_OK}✔${C_RST} Docker local stack" \
+    "${C_OK}✔${C_RST} Terraform apply submitted (S3 / IAM / ALB / ASG)" \
+    "${C_WARN}…${C_RST} ASG instances need 15–25+ min before ALB health is green"
+  echo "Stop:  bash scripts/run.sh stop --yes"
 }
 
-# Sequential shutdown: local Docker first, then AWS destroy
 cmd_stop() {
-  echo "=== SEQUENTIAL SHUTDOWN ==="
-  echo
+  ui_banner "SHUTDOWN — sequential teardown"
 
-  echo "=== [1/2] Local Docker Compose ==="
+  # ----- 1 Docker -----
+  ui_section "[1/2] Docker Compose"
   if [[ ${#COMPOSE[@]} -gt 0 ]]; then
-    "${COMPOSE[@]}" down --remove-orphans || true
-    echo "  Local containers stopped."
+    if "${COMPOSE[@]}" down --remove-orphans; then
+      ui_ok "docker compose down"
+    else
+      ui_warn "compose down returned non-zero (continuing)"
+    fi
+    report_docker_components_down || true
   else
-    echo "  Compose not available — skip local."
+    ui_skip "Docker Compose not available"
   fi
-  echo
 
-  echo "=== [2/2] AWS Terraform destroy (ALB, ASG, EC2, S3, IAM) ==="
+  # ----- 2 AWS / Terraform -----
+  ui_section "[2/2] AWS / Terraform destroy"
   if ! has_terraform_state; then
-    echo "  No local terraform state — nothing to destroy on AWS from this machine."
-    echo "  If resources exist in the account, run: bash scripts/run.sh aws destroy"
-    echo
-    echo "=== SHUTDOWN COMPLETE (local only) ==="
+    ui_skip "no terraform.tfstate — nothing to destroy from this machine"
+    ui_summary_box "SHUTDOWN" \
+      "${C_OK}✔${C_RST} Docker stopped" \
+      "${C_DIM}–${C_RST} AWS destroy skipped (no state)"
     return 0
   fi
 
   if [[ "$FULL_YES" -eq 1 ]] || [[ "${RUN_FULL_YES:-}" == "1" ]]; then
     bash "$ROOT/scripts/aws_up.sh" destroy
   else
-    echo "This permanently deletes ALB, ASG instances, S3 buckets, IAM roles."
-    echo "Type yes to destroy AWS resources:"
+    echo "Permanently deletes ALB, ASG, EC2, S3, IAM. Type yes:"
     read -r ans || true
     if [[ "${ans}" == "yes" ]]; then
       bash "$ROOT/scripts/aws_up.sh" destroy
     else
-      echo "  AWS destroy skipped. Local Docker is already down."
-      echo "  Later: bash scripts/run.sh aws destroy"
+      ui_skip "AWS destroy (Docker already down)"
+      ui_summary_box "SHUTDOWN" \
+        "${C_OK}✔${C_RST} Docker stopped" \
+        "${C_WARN}⚠${C_RST} AWS left running — bash scripts/run.sh aws destroy"
+      return 0
     fi
   fi
 
-  echo
-  echo "=== SHUTDOWN COMPLETE ==="
+  ui_summary_box "SHUTDOWN" \
+    "${C_OK}✔${C_RST} Docker: ollama / backend / frontend down" \
+    "${C_OK}✔${C_RST} Terraform destroy completed (ALB, ASG, S3, IAM)" \
+    "${C_OK}✔${C_RST} ASG removed — will not launch replacement instances"
 }
 
 cmd_status() {
-  echo "=== Local containers ==="
+  ui_banner "STATUS"
+  ui_section "Docker"
   if [[ ${#COMPOSE[@]} -gt 0 ]]; then
     "${COMPOSE[@]}" ps || true
+    report_docker_components_up || true
   else
-    echo "(compose unavailable)"
+    ui_warn "compose unavailable"
   fi
-  echo
-  echo "=== Local health ==="
-  if curl -sf "$HEALTH_URL"; then echo; else echo "Backend not reachable at $HEALTH_URL"; fi
-  echo
-  echo "=== AWS terraform outputs ==="
+  ui_section "AWS / Terraform"
   if has_terraform_state; then
-    (cd "$ROOT/terraform" && terraform output 2>/dev/null) || echo "(no outputs)"
+    (cd "$ROOT/terraform" && terraform output 2>/dev/null) || ui_warn "no outputs"
   else
-    echo "(no local terraform state)"
+    ui_skip "no terraform state"
   fi
 }
 
@@ -245,7 +334,7 @@ cmd_logs() {
 
 cmd_test() {
   run_preflight local || true
-  echo "=== Backend tests ==="
+  ui_section "Backend tests"
   if [[ -d backend/.venv ]]; then
     # shellcheck disable=SC1091
     source backend/.venv/bin/activate
@@ -256,6 +345,7 @@ cmd_test() {
     python3 -m pip install -q -r requirements.txt pytest python-multipart 2>/dev/null || true
     python3 -m pytest -q tests/test_expand_query.py tests/test_api_models.py tests/test_rag_helpers.py tests/test_integration_api.py
   )
+  ui_ok "pytest finished"
 }
 
 cmd_aws() {
@@ -275,7 +365,7 @@ cmd_preflight() {
 }
 
 usage() {
-  sed -n '2,12p' "$0"
+  sed -n '2,10p' "$0"
 }
 
 ARGS=()
