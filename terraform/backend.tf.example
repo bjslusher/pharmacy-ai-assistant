@@ -1,0 +1,16 @@
+# Optional remote state (bonus / team collaboration).
+# Copy to backend.tf and fill in a pre-created bucket + lock table, then:
+#   terraform init -reconfigure
+#
+# Default demos use LOCAL state (terraform/terraform.tfstate) so
+# bash scripts/run.sh stop can destroy without a remote bootstrap.
+#
+# terraform {
+#   backend "s3" {
+#     bucket         = "YOUR-TFSTATE-BUCKET"
+#     key            = "pharmacy-ai-assistant/terraform.tfstate"
+#     region         = "us-east-1"
+#     dynamodb_table = "YOUR-TF-LOCK-TABLE"
+#     encrypt        = true
+#   }
+# }
