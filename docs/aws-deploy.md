@@ -1,110 +1,66 @@
-# AWS deploy — EC2 + S3 (Free Tier–first)
+# AWS deploy — S3 + ALB + Auto Scaling (demo)
 
-This project creates **real AWS resources** when you run apply. Defaults target **AWS Free Tier** where possible.
+Terraform creates a **demo-scale** production-shaped stack: knowledge in **S3**, compute in an **Auto Scaling Group**, traffic through an **Application Load Balancer**.
 
-| Resource | Purpose | Free Tier notes |
-|----------|---------|-----------------|
-| **S3 data bucket** | Seed knowledge (`source_data/*.txt`). EC2 **syncs from this bucket at first boot**. | 5 GB standard storage is plenty for seed txt files |
-| **S3 logs bucket** | Access logs + bootstrap/health markers | Same S3 free storage pool |
-| **IAM role + instance profile** | EC2 reads/writes buckets without static keys | IAM is free |
-| **Security group** | SSH 22, UI 80/3000, API 8000 | Free |
-| **EC2 `t3.micro`** | Ubuntu + Docker Compose (backend, frontend, Ollama) | **750 hrs/mo** of t2.micro/t3.micro for eligible 12‑month accounts |
-| **EBS 30 GB gp3** | Root volume | **30 GB** of GP storage is the usual Free Tier cap |
+| Resource | Purpose | Notes |
+|----------|---------|--------|
+| **S3 data** | Seed `source_data/*.txt`; instances **sync at boot** | Private, encrypted |
+| **S3 logs** | Access + bootstrap markers | Private |
+| **IAM instance profile** | EC2 ↔ S3 without static keys | |
+| **Launch template** | AMI, type, user_data, SG | Same Docker stack as local |
+| **ASG** | `min=1`, `desired=1`, `max=2` | CPU target-tracking policy for scale demo |
+| **ALB** | Public HTTP :80 | Path `/api/*` → backend :8000; default → frontend :3000 |
+| **Target groups** | Frontend + backend health checks | Backend: `/api/health` |
 
-> Always confirm current Free Tier terms in your account: https://aws.amazon.com/free/
+> **Cost:** ALB is **not** Free Tier. EC2 `t3.micro` hours may be. Destroy when the demo ends: `bash scripts/run.sh stop --yes`
 
-## Defaults (cost-conscious)
+## Defaults
 
-| Setting | Default | Why |
-|---------|---------|-----|
-| `instance_type` | `t3.micro` | Free Tier eligible |
-| `root_volume_gb` | `30` | Matches typical Free Tier EBS allowance |
-| `ollama_model` | `llama3.2:1b` | Fits micro RAM/disk better than full `llama3` |
-| `ollama_embed_model` | `nomic-embed-text` | Small embed model |
-| Region | `us-east-1` | Common Free Tier AMI availability |
+| Setting | Default |
+|---------|---------|
+| `instance_type` | `t3.micro` |
+| `root_volume_gb` | `30` |
+| `asg_min_size` / `desired` / `max` | `1` / `1` / `2` |
+| `asg_health_check_grace_seconds` | `1200` (20 min for Docker + models) |
+| `ollama_model` | `llama3.2:1b` |
 
-**Tradeoff:** On `t3.micro`, answers can be slow and memory-tight. For a polished live demo after Free Tier limits, bump to `t3.small` / `t3.medium` and `llama3` via tfvars.
-
-## Local apply (WSL2 / laptop)
-
-```bash
-# 1. Profiles (prefers brian, then default)
-python3 scripts/detect_aws_profile.py --list
-
-# 2. Plan (no EC2 charge until apply)
-bash scripts/aws_up.sh plan
-
-# 3. Apply Free Tier defaults
-bash scripts/aws_up.sh apply
-
-# Or force the free-tier file explicitly:
-# cd terraform && terraform apply -var-file=free-tier.tfvars \
-#   -var="aws_profile=$AWS_PROFILE" -var="aws_region=us-east-1"
-
-# 4. Outputs
-cd terraform && terraform output
-```
-
-Optional `terraform.tfvars`:
-
-```hcl
-key_name      = "your-keypair-name"
-instance_type = "t3.micro"
-root_volume_gb = 30
-ollama_model  = "llama3.2:1b"
-aws_region    = "us-east-1"
-```
-
-## What happens on EC2 at startup (`user_data`)
-
-1. Install Docker Engine + Compose plugin + AWS CLI v2  
-2. `git clone` this repository  
-3. **`aws s3 sync s3://DATA_BUCKET/source_data/` → `backend/source_data/`**  
-4. Write boot heartbeat to S3  
-5. `docker compose up --build -d`  
-6. `ollama pull` **small** chat model + embed model  
-7. Wait for `/api/health`; upload health JSON to logs bucket  
-
-Bootstrap log: `/var/log/pharmacy-ai-bootstrap.log`
-
-## Verify after apply
+## Apply
 
 ```bash
-IP=$(cd terraform && terraform output -raw instance_public_ip)
-DATA=$(cd terraform && terraform output -raw s3_data_bucket)
-
-aws s3 ls "s3://$DATA/source_data/"
-
-# First boot can take 10–20+ minutes on t3.micro (builds + model pull)
-curl -s "http://$IP:8000/api/health" | jq
-# UI: http://$IP:3000
+bash scripts/run.sh aws preflight
+bash scripts/run.sh aws plan
+bash scripts/run.sh aws apply
+# or: bash scripts/run.sh full --yes
 ```
 
-## Destroy (stop all ongoing charges)
+## After apply — instructor checklist
+
+1. **EC2 → Auto Scaling Groups** — group `pharmacy-ai-assistant-asg-*`, desired 1  
+2. **EC2 → Load Balancing → Load Balancers** — application LB  
+3. **Target groups** — frontend :3000, backend :8000 (healthy after bootstrap)  
+4. **S3** — data + logs buckets; `source_data/` objects  
+5. Browser: `terraform output frontend_url` → UI via ALB  
+6. `curl $(terraform output -raw health_url)` → JSON health  
+
+Bootstrap is still slow on micro (15–25+ minutes). Grace period is 20 minutes so ASG does not thrash during first boot.
+
+## Sequential stop
 
 ```bash
-bash scripts/aws_up.sh destroy
+bash scripts/run.sh stop          # prompts before AWS destroy
+bash scripts/run.sh stop --yes    # local Docker down, then terraform destroy
 ```
 
-Even Free Tier accounts should destroy demos you are not using so hours/disk do not surprise you after eligibility ends.
+Order: **(1)** `docker compose down` → **(2)** `terraform destroy` (ALB, ASG/EC2, S3, IAM).
 
-## Console checklist
+## Architecture sketch
 
-- **S3**: `pharmacy-ai-assistant-data-*` and `*-logs-*`  
-- **S3 → data → source_data/**: imprint + DEA txt objects  
-- **EC2**: **t3.micro**, instance profile attached  
-- **EBS**: **30 GB** root  
-- **IAM**: role `pharmacy-ai-assistant-ec2-role-*`  
-- **Security groups**: 22, 80, 3000, 8000  
+```text
+Internet → ALB :80
+             ├─ /api/*  → TG backend  → ASG instances :8000  (FastAPI)
+             └─ /*      → TG frontend → ASG instances :3000  (nginx UI)
 
-## When to leave Free Tier
-
-| Symptom | Change |
-|---------|--------|
-| OOM / container restarts | `instance_type = "t3.small"` or `t3.medium` |
-| Disk full pulling models | `root_volume_gb = 40` (billable over 30 GB) |
-| Quality too low | `ollama_model = "llama3"` on a larger instance |
-
-## Cost note
-
-Free Tier is **not permanent** and **not unlimited**. Public IPv4 addresses may incur charges on newer accounts. Destroy when the assessment demo is finished.
+ASG instances (1–2):
+  user_data → git clone → s3 sync source_data → docker compose
+  (backend + frontend + ollama)
+```

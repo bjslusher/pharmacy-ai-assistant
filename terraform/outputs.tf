@@ -1,11 +1,13 @@
-# Convenience re-exports — primary outputs also live in main.tf
-# Kept so `terraform output` documentation is easy to find.
+# Primary outputs are declared in main.tf.
+# This file keeps a single summary map for quick terraform output -json use.
 
 output "summary" {
+  description = "Demo endpoints and core resource ids"
   value = {
-    frontend   = "http://$${aws_instance.app.public_ip}:3000"
-    backend    = "http://$${aws_instance.app.public_ip}:8000"
-    health     = "http://$${aws_instance.app.public_ip}:8000/api/health"
+    alb_dns     = aws_lb.app.dns_name
+    frontend    = "http://${aws_lb.app.dns_name}"
+    health      = "http://${aws_lb.app.dns_name}/api/health"
+    asg_name    = aws_autoscaling_group.app.name
     data_bucket = aws_s3_bucket.data.id
     logs_bucket = aws_s3_bucket.logs.id
   }

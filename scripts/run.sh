@@ -2,19 +2,10 @@
 # =============================================================================
 # Pharmacy AI Assistant — unified orchestrator (local Docker + AWS)
 #
-# Assessment / demo (one seamless path):
-#   bash scripts/run.sh full          # preflight all → Docker up → AWS plan+apply
-#   bash scripts/run.sh full --yes    # same, no apply confirmation
-#
-# Day-to-day local only:
-#   bash scripts/run.sh               # preflight local + Docker only
-#   bash scripts/run.sh stop|status|logs|test
-#
-# AWS only:
+#   bash scripts/run.sh full [--yes]   # preflight all → Docker → AWS plan+apply
+#   bash scripts/run.sh                # local Docker only
+#   bash scripts/run.sh stop [--yes]   # sequential shutdown: Docker → AWS destroy
 #   bash scripts/run.sh aws preflight|plan|apply|destroy
-#
-# Checks:
-#   bash scripts/run.sh preflight all
 # =============================================================================
 set -euo pipefail
 
@@ -90,15 +81,18 @@ pull_models() {
     ollama pull "$OLLAMA_EMBED_MODEL" || true
   else
     echo "  docker compose exec ollama ollama pull $OLLAMA_MODEL"
-    echo "  docker compose exec ollama ollama pull $OLLAMA_EMBED_MODEL"
   fi
 }
 
 require_compose() {
   if [[ ${#COMPOSE[@]} -eq 0 ]]; then
-    echo "ERROR: Docker Compose not available (preflight should have caught this)" >&2
+    echo "ERROR: Docker Compose not available" >&2
     exit 1
   fi
+}
+
+has_terraform_state() {
+  [[ -f "$ROOT/terraform/terraform.tfstate" ]] || [[ -d "$ROOT/terraform/.terraform" ]]
 }
 
 print_local_banner() {
@@ -116,17 +110,11 @@ print_aws_banner() {
   echo "=============================================="
   echo "  AWS (Terraform outputs)"
   if [[ -d "$ROOT/terraform" ]] && command -v terraform >/dev/null 2>&1; then
-    (
-      cd "$ROOT/terraform"
-      terraform output 2>/dev/null || echo "  (no outputs yet — run apply)"
-    )
-  else
-    echo "  (terraform not available)"
+    (cd "$ROOT/terraform" && terraform output 2>/dev/null) || echo "  (no outputs yet)"
   fi
   echo "=============================================="
 }
 
-# Local Docker only (fast iteration)
 cmd_start() {
   echo "=== STAGE 1/1 — Local Docker ==="
   run_preflight local
@@ -140,13 +128,12 @@ cmd_start() {
   pull_models || true
   wait_http "$HEALTH_URL" "backend" 45 || true
   print_local_banner
-  echo "Full system (Docker + AWS):  bash scripts/run.sh full"
-  echo "Stop local:                  bash scripts/run.sh stop"
+  echo "Full system (Docker + AWS ALB/ASG):  bash scripts/run.sh full"
+  echo "Stop everything:                     bash scripts/run.sh stop"
 }
 
-# Seamless assessment path: local + AWS in one command
 cmd_full() {
-  echo "=== Pharmacy AI — FULL SYSTEM (local Docker + AWS) ==="
+  echo "=== Pharmacy AI — FULL SYSTEM (local Docker + AWS ALB/ASG) ==="
   echo
 
   echo "=== STAGE 1/4 — Preflight (local + AWS) ==="
@@ -163,7 +150,7 @@ cmd_full() {
   print_local_banner
   echo
 
-  echo "=== STAGE 3/4 — AWS Terraform plan ==="
+  echo "=== STAGE 3/4 — AWS Terraform plan (S3 + ASG + ALB) ==="
   bash "$ROOT/scripts/aws_up.sh" plan
   echo
 
@@ -171,13 +158,12 @@ cmd_full() {
   if [[ "$FULL_YES" -eq 1 ]] || [[ "${RUN_FULL_YES:-}" == "1" ]]; then
     bash "$ROOT/scripts/aws_up.sh" apply
   else
-    echo "About to create EC2 + S3 (Free Tier defaults). Type yes to continue:"
+    echo "Creates S3, IAM, ALB, ASG (1–2× EC2). Type yes to continue:"
     read -r ans || true
     if [[ "${ans}" == "yes" ]]; then
       bash "$ROOT/scripts/aws_up.sh" apply
     else
       echo "Apply skipped. Local stack is still running."
-      echo "Later: bash scripts/run.sh aws apply"
       print_local_banner
       return 0
     fi
@@ -186,16 +172,51 @@ cmd_full() {
   print_local_banner
   print_aws_banner
   echo
-  echo "Local demo:  open $FRONTEND_URL"
-  echo "AWS demo:    wait 10–20 min for EC2 user_data, then use terraform output frontend_url"
-  echo "Teardown:    bash scripts/run.sh stop   &&   bash scripts/run.sh aws destroy"
+  echo "Local:  $FRONTEND_URL"
+  echo "AWS:    use terraform output frontend_url / health_url (ALB DNS)"
+  echo "        First ASG instance needs 15–25+ min for user_data + health checks"
+  echo "Stop:   bash scripts/run.sh stop --yes"
 }
 
+# Sequential shutdown: local Docker first, then AWS destroy
 cmd_stop() {
-  require_compose
-  echo "=== Stopping local Docker stack ==="
-  "${COMPOSE[@]}" down
-  echo "AWS resources (if any) are unchanged. Destroy with: bash scripts/run.sh aws destroy"
+  echo "=== SEQUENTIAL SHUTDOWN ==="
+  echo
+
+  echo "=== [1/2] Local Docker Compose ==="
+  if [[ ${#COMPOSE[@]} -gt 0 ]]; then
+    "${COMPOSE[@]}" down --remove-orphans || true
+    echo "  Local containers stopped."
+  else
+    echo "  Compose not available — skip local."
+  fi
+  echo
+
+  echo "=== [2/2] AWS Terraform destroy (ALB, ASG, EC2, S3, IAM) ==="
+  if ! has_terraform_state; then
+    echo "  No local terraform state — nothing to destroy on AWS from this machine."
+    echo "  If resources exist in the account, run: bash scripts/run.sh aws destroy"
+    echo
+    echo "=== SHUTDOWN COMPLETE (local only) ==="
+    return 0
+  fi
+
+  if [[ "$FULL_YES" -eq 1 ]] || [[ "${RUN_FULL_YES:-}" == "1" ]]; then
+    bash "$ROOT/scripts/aws_up.sh" destroy
+  else
+    echo "This permanently deletes ALB, ASG instances, S3 buckets, IAM roles."
+    echo "Type yes to destroy AWS resources:"
+    read -r ans || true
+    if [[ "${ans}" == "yes" ]]; then
+      bash "$ROOT/scripts/aws_up.sh" destroy
+    else
+      echo "  AWS destroy skipped. Local Docker is already down."
+      echo "  Later: bash scripts/run.sh aws destroy"
+    fi
+  fi
+
+  echo
+  echo "=== SHUTDOWN COMPLETE ==="
 }
 
 cmd_status() {
@@ -209,11 +230,11 @@ cmd_status() {
   echo "=== Local health ==="
   if curl -sf "$HEALTH_URL"; then echo; else echo "Backend not reachable at $HEALTH_URL"; fi
   echo
-  echo "=== AWS terraform outputs (if state exists) ==="
-  if [[ -d "$ROOT/terraform/.terraform" ]] || [[ -f "$ROOT/terraform/terraform.tfstate" ]]; then
+  echo "=== AWS terraform outputs ==="
+  if has_terraform_state; then
     (cd "$ROOT/terraform" && terraform output 2>/dev/null) || echo "(no outputs)"
   else
-    echo "(no local terraform state — run: bash scripts/run.sh full)"
+    echo "(no local terraform state)"
   fi
 }
 
@@ -223,7 +244,6 @@ cmd_logs() {
 }
 
 cmd_test() {
-  echo "=== Preflight (local tools) ==="
   run_preflight local || true
   echo "=== Backend tests ==="
   if [[ -d backend/.venv ]]; then
@@ -241,12 +261,8 @@ cmd_test() {
 cmd_aws() {
   local sub="${1:-plan}"
   case "$sub" in
-    preflight|check)
-      run_preflight aws
-      ;;
-    plan|apply|destroy|output)
-      bash "$ROOT/scripts/aws_up.sh" "$sub"
-      ;;
+    preflight|check) run_preflight aws ;;
+    plan|apply|destroy|output) bash "$ROOT/scripts/aws_up.sh" "$sub" ;;
     *)
       echo "Usage: bash scripts/run.sh aws [preflight|plan|apply|destroy|output]" >&2
       exit 1
@@ -255,15 +271,13 @@ cmd_aws() {
 }
 
 cmd_preflight() {
-  local mode="${1:-local}"
-  run_preflight "$mode"
+  run_preflight "${1:-local}"
 }
 
 usage() {
-  sed -n '2,20p' "$0"
+  sed -n '2,12p' "$0"
 }
 
-# Strip --yes from positional handling
 ARGS=()
 for a in "$@"; do
   case "$a" in
