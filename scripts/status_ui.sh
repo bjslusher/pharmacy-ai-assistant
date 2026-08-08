@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Shared visual cues for orchestrator (sourced by run.sh / aws_up.sh)
-# Avoid set -e here so status helpers never abort the parent.
 
 if [[ -t 1 ]] && [[ "${NO_COLOR:-}" == "" ]]; then
-  C_OK='\033[1;32m'    # bright green
-  C_FAIL='\033[1;31m'  # bright red
-  C_WARN='\033[1;33m'  # yellow
-  C_INFO='\033[1;36m'  # cyan
+  C_OK='\033[1;32m'
+  C_FAIL='\033[1;31m'
+  C_WARN='\033[1;33m'
+  C_INFO='\033[1;36m'
   C_DIM='\033[2m'
   C_BOLD='\033[1m'
   C_RST='\033[0m'
@@ -52,7 +51,7 @@ ui_skip() {
 }
 
 ui_summary_box() {
-  local kind="$1" # STARTUP | SHUTDOWN
+  local kind="$1"
   shift
   echo
   if [[ "$kind" == "STARTUP" ]]; then
@@ -63,5 +62,41 @@ ui_summary_box() {
   for line in "$@"; do
     echo -e "  $line"
   done
+  echo
+}
+
+# Big obvious where-to-click block (always last thing users should see)
+ui_access_box() {
+  local local_fe="${1:-}"
+  local local_api="${2:-}"
+  local aws_fe="${3:-}"
+  local aws_health="${4:-}"
+
+  echo
+  echo -e "${C_OK}${C_BOLD}"
+  echo "╔════════════════════════════════════════════════════════════╗"
+  echo "║                                                            ║"
+  echo "║   OPEN THE APP HERE                                        ║"
+  echo "║                                                            ║"
+  if [[ -n "$local_fe" ]]; then
+    printf "║   LOCAL UI:   %-44s ║\n" "$local_fe"
+  fi
+  if [[ -n "$local_api" ]]; then
+    printf "║   LOCAL API:  %-44s ║\n" "$local_api"
+  fi
+  if [[ -n "$aws_fe" ]]; then
+    echo "║                                                            ║"
+    printf "║   AWS UI:     %-44s ║\n" "$aws_fe"
+  fi
+  if [[ -n "$aws_health" ]]; then
+    printf "║   AWS HEALTH: %-44s ║\n" "$aws_health"
+  fi
+  echo "║                                                            ║"
+  echo "╚════════════════════════════════════════════════════════════╝"
+  echo -e "${C_RST}"
+  if [[ -n "$aws_fe" ]]; then
+    echo -e "  ${C_WARN}AWS UI may take 15-25+ minutes after apply (Docker + models on EC2).${C_RST}"
+    echo -e "  ${C_DIM}Until then use LOCAL UI above.${C_RST}"
+  fi
   echo
 }

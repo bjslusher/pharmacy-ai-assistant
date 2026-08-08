@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Plan / apply / destroy — S3 + IAM + ALB + ASG. Preflight always first.
+# Plan / apply / destroy - S3 + IAM + ALB + ASG. Preflight always first.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,7 +16,7 @@ if [[ ! -f "$PREFLIGHT" ]]; then
   exit 1
 fi
 
-ui_banner "AWS / Terraform — $ACTION"
+ui_banner "AWS / Terraform - $ACTION"
 
 ui_section "Preflight"
 # shellcheck disable=SC1090
@@ -57,7 +57,7 @@ case "$ACTION" in
     ;;
   apply)
     ui_section "Terraform apply"
-    ui_wait "creating/updating S3, IAM, ALB, target groups, ASG, launch template…"
+    ui_wait "creating/updating S3, IAM, ALB, target groups, ASG, launch template..."
     if terraform apply -input=false -auto-approve "${VAR_ARGS[@]}"; then
       ui_ok "terraform apply"
     else
@@ -66,41 +66,33 @@ case "$ACTION" in
     fi
 
     ui_section "AWS components (from state)"
-    # Best-effort component checklist from outputs
-    if DATA=$(terraform output -raw s3_data_bucket 2>/dev/null); then
-      ui_ok "S3 data bucket     $DATA"
-    else
-      ui_warn "S3 data bucket     (no output)"
-    fi
-    if LOGS=$(terraform output -raw s3_logs_bucket 2>/dev/null); then
-      ui_ok "S3 logs bucket     $LOGS"
-    else
-      ui_warn "S3 logs bucket     (no output)"
-    fi
-    if ASG=$(terraform output -raw asg_name 2>/dev/null); then
-      ui_ok "Auto Scaling Group $ASG"
-    else
-      ui_warn "Auto Scaling Group (no output)"
-    fi
-    if ALB=$(terraform output -raw alb_dns_name 2>/dev/null); then
-      ui_ok "Application LB     $ALB"
-      ui_ok "Frontend URL       http://$ALB"
-      ui_ok "Health URL         http://$ALB/api/health"
-    else
-      ui_warn "ALB DNS            (no output)"
-    fi
-    ui_warn "ASG instances need 15–25+ min before target groups go healthy"
+    DATA=$(terraform output -raw s3_data_bucket 2>/dev/null || true)
+    LOGS=$(terraform output -raw s3_logs_bucket 2>/dev/null || true)
+    ASG=$(terraform output -raw asg_name 2>/dev/null || true)
+    ALB=$(terraform output -raw alb_dns_name 2>/dev/null || true)
+    FE=$(terraform output -raw frontend_url 2>/dev/null || true)
+    HEALTH=$(terraform output -raw health_url 2>/dev/null || true)
 
-    echo
-    terraform output
+    [[ -n "$DATA" ]] && ui_ok "S3 data bucket     $DATA" || ui_warn "S3 data bucket (no output)"
+    [[ -n "$LOGS" ]] && ui_ok "S3 logs bucket     $LOGS" || ui_warn "S3 logs bucket (no output)"
+    [[ -n "$ASG" ]] && ui_ok "Auto Scaling Group $ASG" || ui_warn "Auto Scaling Group (no output)"
+    [[ -n "$ALB" ]] && ui_ok "Application LB     $ALB" || ui_warn "ALB DNS (no output)"
+
     ui_summary_box "STARTUP" \
       "${C_OK}✔${C_RST} Terraform apply succeeded" \
       "${C_OK}✔${C_RST} S3 / IAM / ALB / ASG present in state" \
       "${C_WARN}…${C_RST} EC2 user_data still booting Docker on instances"
+
+    # Always print access last - local is immediate; AWS after bootstrap
+    ui_access_box \
+      "http://localhost:3000" \
+      "http://localhost:8000/docs" \
+      "${FE:-}" \
+      "${HEALTH:-}"
     ;;
   destroy)
-    ui_section "Terraform destroy (ASG first → no replacement instances)"
-    ui_wait "destroying ALB, target groups, ASG/EC2, S3, IAM…"
+    ui_section "Terraform destroy (ASG first - no replacement instances)"
+    ui_wait "destroying ALB, target groups, ASG/EC2, S3, IAM..."
     if terraform destroy -input=false -auto-approve "${VAR_ARGS[@]}"; then
       ui_ok "terraform destroy"
     else
@@ -109,7 +101,6 @@ case "$ACTION" in
     fi
 
     ui_section "Post-destroy verification"
-    # State should be empty
     LEFT=$(terraform state list 2>/dev/null || true)
     if [[ -z "${LEFT}" ]]; then
       ui_down "terraform state     empty (all managed resources gone)"
@@ -126,11 +117,14 @@ case "$ACTION" in
 
     ui_summary_box "SHUTDOWN" \
       "${C_OK}✔${C_RST} terraform destroy completed" \
-      "${C_OK}✔${C_RST} ASG deleted — no auto-replacement of instances" \
+      "${C_OK}✔${C_RST} ASG deleted - no auto-replacement of instances" \
       "${C_OK}✔${C_RST} ALB / S3 / IAM removed from this stack"
     ;;
   output)
     terraform output
+    FE=$(terraform output -raw frontend_url 2>/dev/null || true)
+    HEALTH=$(terraform output -raw health_url 2>/dev/null || true)
+    ui_access_box "http://localhost:3000" "http://localhost:8000/docs" "${FE:-}" "${HEALTH:-}"
     ;;
   preflight)
     ui_ok "preflight-only run finished"

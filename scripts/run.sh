@@ -144,7 +144,7 @@ pull_models() {
       ui_warn "model $OLLAMA_EMBED_MODEL pull failed"
     fi
   else
-    ui_warn "ollama not running — skip model pull"
+    ui_warn "ollama not running - skip model pull"
   fi
 }
 
@@ -160,24 +160,28 @@ has_terraform_state() {
   [[ -f "$ROOT/terraform/terraform.tfstate" ]] && [[ -s "$ROOT/terraform/terraform.tfstate" ]]
 }
 
-print_local_banner() {
-  echo
-  echo -e "${C_BOLD}  LOCAL STACK${C_RST}"
-  echo "  Frontend:  $FRONTEND_URL"
-  echo "  Backend:   $BACKEND_URL/docs"
-  echo "  Health:    $HEALTH_URL"
-}
-
-print_aws_banner() {
-  echo
-  echo -e "${C_BOLD}  AWS / Terraform outputs${C_RST}"
+# Read AWS frontend URL from terraform outputs (empty if not applied)
+aws_frontend_url() {
   if [[ -d "$ROOT/terraform" ]] && command -v terraform >/dev/null 2>&1; then
-    (cd "$ROOT/terraform" && terraform output 2>/dev/null) || echo "  (no outputs yet)"
+    (cd "$ROOT/terraform" && terraform output -raw frontend_url 2>/dev/null) || true
   fi
 }
 
+aws_health_url() {
+  if [[ -d "$ROOT/terraform" ]] && command -v terraform >/dev/null 2>&1; then
+    (cd "$ROOT/terraform" && terraform output -raw health_url 2>/dev/null) || true
+  fi
+}
+
+print_access() {
+  local aws_fe aws_h
+  aws_fe="$(aws_frontend_url)"
+  aws_h="$(aws_health_url)"
+  ui_access_box "$FRONTEND_URL" "$BACKEND_URL/docs" "${aws_fe:-}" "${aws_h:-}"
+}
+
 start_local_stack() {
-  ui_banner "STARTUP — Local Docker"
+  ui_banner "STARTUP - Local Docker"
   ui_section "Preflight"
   run_preflight local
   ui_ok "local preflight passed"
@@ -201,26 +205,25 @@ start_local_stack() {
   wait_http "$FRONTEND_URL" "frontend UI" 20 || true
 
   report_docker_components_up || true
-  print_local_banner
 }
 
 cmd_start() {
   start_local_stack
   ui_summary_box "STARTUP" \
     "${C_OK}✔${C_RST} Docker: ollama / backend / frontend" \
-    "${C_OK}✔${C_RST} Local URLs printed above" \
-    "${C_DIM}–${C_RST} AWS not started (use: bash scripts/run.sh full)"
+    "${C_DIM}-${C_RST} AWS not started (use: bash scripts/run.sh full)"
+  print_access
   echo "Stop everything:  bash scripts/run.sh stop"
 }
 
 cmd_full() {
-  ui_banner "STARTUP — Full system (Docker + AWS)"
+  ui_banner "STARTUP - Full system (Docker + AWS)"
 
-  ui_section "Stage 1/4 — Preflight (local + AWS)"
+  ui_section "Stage 1/4 - Preflight (local + AWS)"
   run_preflight all
   ui_ok "preflight all passed"
 
-  ui_section "Stage 2/4 — Local Docker"
+  ui_section "Stage 2/4 - Local Docker"
   require_compose
   ensure_env
   if "${COMPOSE[@]}" up --build -d; then
@@ -233,13 +236,12 @@ cmd_full() {
   pull_models || true
   wait_http "$HEALTH_URL" "backend API" 45 || true
   report_docker_components_up || true
-  print_local_banner
 
-  ui_section "Stage 3/4 — Terraform plan"
+  ui_section "Stage 3/4 - Terraform plan"
   bash "$ROOT/scripts/aws_up.sh" plan
   ui_ok "terraform plan finished"
 
-  ui_section "Stage 4/4 — Terraform apply (S3, IAM, ALB, ASG)"
+  ui_section "Stage 4/4 - Terraform apply (S3, IAM, ALB, ASG)"
   if [[ "$FULL_YES" -eq 1 ]] || [[ "${RUN_FULL_YES:-}" == "1" ]]; then
     bash "$ROOT/scripts/aws_up.sh" apply
   else
@@ -249,23 +251,22 @@ cmd_full() {
       bash "$ROOT/scripts/aws_up.sh" apply
     else
       ui_skip "AWS apply (local Docker still up)"
-      print_local_banner
+      print_access
       return 0
     fi
   fi
 
-  print_aws_banner
   ui_summary_box "STARTUP" \
     "${C_OK}✔${C_RST} Docker local stack" \
-    "${C_OK}✔${C_RST} Terraform apply submitted (S3 / IAM / ALB / ASG)" \
-    "${C_WARN}…${C_RST} ASG instances need 15–25+ min before ALB health is green"
+    "${C_OK}✔${C_RST} Terraform apply (S3 / IAM / ALB / ASG)" \
+    "${C_WARN}…${C_RST} ASG instances need 15-25+ min before AWS UI is ready"
+  print_access
   echo "Stop:  bash scripts/run.sh stop --yes"
 }
 
 cmd_stop() {
-  ui_banner "SHUTDOWN — sequential teardown"
+  ui_banner "SHUTDOWN - sequential teardown"
 
-  # ----- 1 Docker -----
   ui_section "[1/2] Docker Compose"
   if [[ ${#COMPOSE[@]} -gt 0 ]]; then
     if "${COMPOSE[@]}" down --remove-orphans; then
@@ -278,13 +279,12 @@ cmd_stop() {
     ui_skip "Docker Compose not available"
   fi
 
-  # ----- 2 AWS / Terraform -----
   ui_section "[2/2] AWS / Terraform destroy"
   if ! has_terraform_state; then
-    ui_skip "no terraform.tfstate — nothing to destroy from this machine"
+    ui_skip "no terraform.tfstate - nothing to destroy from this machine"
     ui_summary_box "SHUTDOWN" \
       "${C_OK}✔${C_RST} Docker stopped" \
-      "${C_DIM}–${C_RST} AWS destroy skipped (no state)"
+      "${C_DIM}-${C_RST} AWS destroy skipped (no state)"
     return 0
   fi
 
@@ -299,7 +299,7 @@ cmd_stop() {
       ui_skip "AWS destroy (Docker already down)"
       ui_summary_box "SHUTDOWN" \
         "${C_OK}✔${C_RST} Docker stopped" \
-        "${C_WARN}⚠${C_RST} AWS left running — bash scripts/run.sh aws destroy"
+        "${C_WARN}⚠${C_RST} AWS left running - bash scripts/run.sh aws destroy"
       return 0
     fi
   fi
@@ -307,7 +307,7 @@ cmd_stop() {
   ui_summary_box "SHUTDOWN" \
     "${C_OK}✔${C_RST} Docker: ollama / backend / frontend down" \
     "${C_OK}✔${C_RST} Terraform destroy completed (ALB, ASG, S3, IAM)" \
-    "${C_OK}✔${C_RST} ASG removed — will not launch replacement instances"
+    "${C_OK}✔${C_RST} ASG removed - will not launch replacement instances"
 }
 
 cmd_status() {
@@ -325,6 +325,7 @@ cmd_status() {
   else
     ui_skip "no terraform state"
   fi
+  print_access
 }
 
 cmd_logs() {
