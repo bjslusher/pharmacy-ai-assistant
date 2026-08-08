@@ -1,60 +1,51 @@
-# AWS preflight (fail-fast)
+# AWS preflight
 
-Long steps (Docker image builds, Ollama pulls, EC2 `user_data`) must **not** run until AWS is known-good.
-
-## Commands
+Runs **before** Terraform plan/apply so bad credentials fail in seconds, not after a long bootstrap.
 
 ```bash
-# Checks only — finishes in a few seconds
 bash scripts/aws_preflight.sh
-bash scripts/run.sh aws preflight
-
-# Preflight is automatic before plan/apply/destroy
-bash scripts/run.sh aws plan
-bash scripts/run.sh aws apply
+# or via orchestrator
+bash scripts/run.sh full --yes   # includes AWS preflight
 ```
 
-## What is checked (in order)
+## Checks
 
-| # | Check | Failure means |
-|---|--------|----------------|
-| 1 | `python3` + profile detector script | Install python3 |
-| 2 | **AWS CLI** installed | Install AWS CLI v2 |
-| 3 | **Terraform** ≥ 1.5 installed | Install Terraform |
-| 4 | Local profiles (`brian` → `default`) | `aws configure --profile default` |
-| 5 | `~/.aws` files or env keys present | Configure credentials |
-| 6 | **`sts get-caller-identity`** | Bad/expired keys or SSO session |
-| 7 | **EC2 API** `describe-regions` | Wrong region/network/permissions |
-| 8 | **S3 API** `list-buckets` | Missing S3 permissions for apply |
-| 9 | `terraform/` + `user_data.sh.tpl` + seed `.txt` files | Repo incomplete / wrong cwd |
+| Step | What |
+|------|------|
+| 1 | python3 |
+| 2 | AWS CLI |
+| 3 | Terraform |
+| 4 | Profile detection (`brian` / `default`) |
+| 5 | Env key **presence** only (values never printed) |
+| 6 | `sts get-caller-identity` (account/ARN **masked**) |
+| 7 | EC2 + S3 API reachability |
+| 8 | Terraform files + seed docs |
 
-On failure the script prints **`[FAIL]`** lines and exits **1** before `terraform init` or `apply`.
+## Identity masking (default)
 
-## Success looks like
+Console output **does not** show full account IDs or IAM ARNs:
 
 ```text
-=== AWS preflight (fail-fast) ===
-  [OK]  python3: ...
-  [OK]  aws cli: ...
-  [OK]  terraform: ...
-  [OK]  using profile: default
-  [OK]  region: us-east-1
-  [OK]  account: 123456789012
-  [OK]  identity: arn:aws:iam::...:user/...
-  [OK]  EC2 API reachable ...
-  [OK]  S3 API reachable ...
-  [OK]  seed docs ready ...
+  [OK]  account: ****4728
+  [OK]  identity: arn:aws:iam::****4728:user/B***
 === PREFLIGHT PASSED — safe to plan/apply ===
+  profile=default region=us-east-1 account=****4728
 ```
 
-## Typical fixes
+Local debug only (do not use while screen-sharing):
+
+```bash
+AWS_PREFLIGHT_SHOW_IDENTITY=1 bash scripts/aws_preflight.sh
+# or
+bash scripts/aws_preflight.sh --show-identity
+```
+
+**Never printed:** `AWS_SECRET_ACCESS_KEY`, session tokens, private keys.
+
+## Troubleshooting
 
 | Message | Fix |
 |---------|-----|
-| AWS CLI not found | Install CLI; restart WSL shell |
 | sts get-caller-identity failed | `aws configure --profile default` or `aws sso login` |
-| no ~/.aws credentials | Create access keys in IAM console, configure locally |
-| S3 list-buckets failed | Attach `AmazonS3FullAccess` (or tighter custom policy) for lab user |
-| terraform not found | Install Terraform 1.5+ |
-
-Only after preflight passes should you run **apply** (which creates resources and starts the slow EC2 bootstrap).
+| S3 list-buckets failed | IAM needs S3 permissions for apply |
+| EC2 API not reachable | Region/permissions/network |
