@@ -49,7 +49,7 @@ locals {
 }
 
 # ---------------------------------------------------------------------------
-# S3 — seed knowledge + logs
+# S3 - seed knowledge + logs
 # ---------------------------------------------------------------------------
 
 resource "aws_s3_bucket" "data" {
@@ -120,16 +120,16 @@ resource "aws_s3_object" "bootstrap_marker" {
   bucket       = aws_s3_bucket.data.id
   key          = "bootstrap/README.txt"
   content      = <<-EOT
-    Pharmacy AI Assistant — S3 data bucket
+    Pharmacy AI Assistant - S3 data bucket
     Seed docs under source_data/
-    EC2/ASG user_data: aws s3 sync → app source_data, then docker compose
+    EC2/ASG user_data: aws s3 sync to app source_data, then docker compose
   EOT
   content_type = "text/plain"
   tags         = local.common_tags
 }
 
 # ---------------------------------------------------------------------------
-# IAM — instance role for S3
+# IAM - instance role for S3
 # ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "ec2" {
@@ -180,12 +180,13 @@ resource "aws_iam_instance_profile" "ec2" {
 }
 
 # ---------------------------------------------------------------------------
-# Security groups — ALB + app instances
+# Security groups - ALB + app instances
+# NOTE: description must be ASCII only (AWS CreateSecurityGroup rejects unicode)
 # ---------------------------------------------------------------------------
 
 resource "aws_security_group" "alb" {
   name        = "${local.name_prefix}-alb-sg-${random_id.suffix.hex}"
-  description = "ALB — public HTTP"
+  description = "ALB - public HTTP"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -208,7 +209,7 @@ resource "aws_security_group" "alb" {
 
 resource "aws_security_group" "app" {
   name        = "${local.name_prefix}-app-sg-${random_id.suffix.hex}"
-  description = "App instances — traffic from ALB + optional SSH"
+  description = "App instances - traffic from ALB and optional SSH"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -263,7 +264,7 @@ resource "aws_security_group" "app" {
 }
 
 # ---------------------------------------------------------------------------
-# Launch template + Auto Scaling Group (demo scale 1–2)
+# Launch template + Auto Scaling Group (demo scale 1-2)
 # ---------------------------------------------------------------------------
 
 resource "aws_launch_template" "app" {
@@ -347,7 +348,7 @@ resource "aws_autoscaling_group" "app" {
   }
 }
 
-# Optional CPU scale-out policy (demo — shows ASG can react to load)
+# Optional CPU scale-out policy (demo - shows ASG can react to load)
 resource "aws_autoscaling_policy" "cpu_target" {
   name                   = "${local.name_prefix}-cpu-target"
   autoscaling_group_name = aws_autoscaling_group.app.name
@@ -362,7 +363,7 @@ resource "aws_autoscaling_policy" "cpu_target" {
 }
 
 # ---------------------------------------------------------------------------
-# Application Load Balancer — path routing /api* → backend, else → frontend
+# Application Load Balancer - path routing /api* -> backend, else -> frontend
 # ---------------------------------------------------------------------------
 
 resource "aws_lb" "app" {
@@ -449,7 +450,7 @@ resource "aws_lb_listener_rule" "api" {
 # ---------------------------------------------------------------------------
 
 output "alb_dns_name" {
-  description = "Application Load Balancer DNS — preferred public entrypoint"
+  description = "Application Load Balancer DNS - preferred public entrypoint"
   value       = aws_lb.app.dns_name
 }
 
