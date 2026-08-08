@@ -7,6 +7,23 @@ on:
     branches: [main]
 
 jobs:
+  lint:
+    name: Ruff lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.9.9"
+          src: "backend"
+          args: "check"
+      - name: Ruff format check
+        uses: astral-sh/ruff-action@v3
+        with:
+          version: "0.9.9"
+          src: "backend"
+          args: "format --check"
+
   backend:
     name: Backend tests
     runs-on: ubuntu-latest
@@ -22,7 +39,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest python-multipart
+          pip install pytest python-multipart ruff
+      - name: Ruff lint (backend)
+        run: |
+          ruff check .
+          ruff format --check .
       - name: Syntax check
         run: python -m py_compile main.py prompts.py rag_service.py
       - name: Unit tests

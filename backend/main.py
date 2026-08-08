@@ -5,23 +5,24 @@ Medication identification + DEA regulations RAG with LangChain, optional Mem0.
 
 from __future__ import annotations
 
-import os
 import logging
+import os
 import traceback
-from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
-from dotenv import load_dotenv
 
 load_dotenv()
 
-from prompts import expand_query
-from rag_service import PharmacyRAG, RAGServiceError
+from prompts import expand_query  # noqa: E402
+from rag_service import PharmacyRAG, RAGServiceError  # noqa: E402
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -40,8 +41,8 @@ def _error_body(
     detail: Optional[str] = None,
     hint: Optional[str] = None,
     status_code: int = 500,
-) -> Dict[str, Any]:
-    body: Dict[str, Any] = {
+) -> dict[str, Any]:
+    body: dict[str, Any] = {
         "error": {
             "code": code,
             "message": message,
@@ -178,7 +179,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
-    sources: List[str] = []
+    sources: list[str] = []
     mode: str
     disclaimer: str = (
         "Educational/informational only. Not medical, legal, or pharmaceutical advice. "
@@ -245,12 +246,12 @@ def chat(req: ChatRequest):
         raise HTTPException(
             status_code=e.http_status,
             detail=f"Query failed: {e.message}" + (f" ({e.detail})" if e.detail else ""),
-        )
+        ) from e
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("Chat error")
-        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Query failed: {e!s}") from e
 
 
 @app.post("/api/meds/identify", response_model=ChatResponse)
@@ -269,11 +270,15 @@ ALLOWED_UPLOAD_SUFFIXES = {".txt", ".md", ".pdf"}
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
 
 
+def _path_suffix(name: str) -> str:
+    return Path(name).suffix.lower()
+
+
 @app.post("/api/ingest")
 async def ingest(file: UploadFile = File(...)):
     service = _require_rag()
     filename = file.filename or "upload.txt"
-    suffix = Path_suffix(filename)
+    suffix = _path_suffix(filename)
     if suffix not in ALLOWED_UPLOAD_SUFFIXES:
         raise HTTPException(
             status_code=400,
@@ -302,16 +307,10 @@ async def ingest(file: UploadFile = File(...)):
             }
         return {"status": "ok", "chunks_added": count, "filename": filename}
     except RAGServiceError as e:
-        raise HTTPException(status_code=e.http_status, detail=e.message)
+        raise HTTPException(status_code=e.http_status, detail=e.message) from e
     except Exception as e:
         logger.exception("Ingest failed for %s", filename)
-        raise HTTPException(status_code=500, detail=f"Ingest failed: {e}")
-
-
-def Path_suffix(name: str) -> str:
-    from pathlib import Path as _P
-
-    return _P(name).suffix.lower()
+        raise HTTPException(status_code=500, detail=f"Ingest failed: {e}") from e
 
 
 @app.get("/api/stats")
