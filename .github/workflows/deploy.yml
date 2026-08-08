@@ -1,0 +1,21 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - "frontend/**"
+      - "terraform/**"
+      - "docker-compose.yml"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy scaffold
+        run: |
+          echo "Deploy workflow for assessment."
+          echo "Build images, push registry, apply Terraform or update compute as configured."

@@ -1,0 +1,14 @@
+name: Destroy
+
+on:
+  workflow_dispatch:
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Destroy scaffold
+        run: |
+          echo "Destroy workflow (bonus)."
+          echo "Would run terraform destroy or tear down containers/resources."

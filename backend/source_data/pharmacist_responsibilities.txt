@@ -1,0 +1,32 @@
+Pharmacist Corresponding Responsibility and DEA Compliance Essentials (Educational Summary)
+
+DISCLAIMER: Educational only. See 21 CFR 1306.04 and the current DEA Pharmacist's Manual. Not legal advice.
+
+Corresponding Responsibility (21 CFR 1306.04):
+A prescription for a controlled substance must be issued for a legitimate medical purpose by an individual practitioner acting in the usual course of professional practice. The pharmacist who fills the prescription has a corresponding responsibility. Knowingly filling a prescription not issued in the usual course of professional treatment may subject the pharmacist to penalties and administrative action.
+
+Red-flag examples that may require further inquiry:
+- Unusually large quantities or high doses without clear medical justification
+- Early refill requests
+- Cash payments for controlled substances when insurance is available
+- Patients traveling long distances or using multiple practitioners
+- Altered or forged-appearing prescriptions
+- Patterns of the same controlled substances from one prescriber to many patients
+
+Actions:
+- Exercise professional judgment. The law does not require a pharmacist to dispense a prescription of doubtful origin.
+- Contact the prescriber when red flags appear.
+- Use state Prescription Drug Monitoring Programs (PDMP) as required or as best practice.
+- Document efforts and decisions.
+- Report suspected diversion when warranted.
+
+Recordkeeping (federal minimum):
+- Maintain records of controlled substances received, dispensed, and inventoried (at least 2 years; states may require longer).
+- Biennial inventory required.
+- Schedule II records often kept separately.
+
+Registration:
+- Pharmacies must hold a current DEA registration to handle controlled substances.
+- Practitioners must have a valid DEA number.
+
+This summary is educational only. Consult the current DEA Pharmacist's Manual, 21 CFR Parts 1300-1316, and applicable state pharmacy laws for authoritative guidance.
