@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Pharmacy AI Assistant — one-command local orchestrator
+# Pharmacy AI Assistant — one-command orchestrator
 # Usage:
-#   bash scripts/run.sh          # start (build + up + model pull + health wait)
-#   bash scripts/run.sh stop     # stop stack
-#   bash scripts/run.sh status   # health + container status
-#   bash scripts/run.sh logs     # follow logs
-#   bash scripts/run.sh test     # run unit + integration tests
-#   bash scripts/run.sh aws      # detect AWS profile + terraform plan
-#   bash scripts/run.sh aws apply
+#   bash scripts/run.sh                # local Docker stack
+#   bash scripts/run.sh stop|status|logs|test
+#   bash scripts/run.sh aws            # AWS preflight + terraform plan
+#   bash scripts/run.sh aws preflight  # AWS checks only (seconds)
+#   bash scripts/run.sh aws apply      # preflight + apply
+#   bash scripts/run.sh aws destroy
 # =============================================================================
 set -euo pipefail
 
@@ -20,8 +19,8 @@ if ! docker compose version >/dev/null 2>&1; then
   if command -v docker-compose >/dev/null 2>&1; then
     COMPOSE=(docker-compose)
   else
-    echo "ERROR: Docker Compose not found. Install Docker Desktop or docker-compose." >&2
-    exit 1
+    # Only required for local docker commands — AWS path has its own checks
+    COMPOSE=()
   fi
 fi
 
@@ -61,7 +60,6 @@ wait_http() {
 
 pull_models() {
   echo "=== Pulling Ollama models (if needed): $OLLAMA_MODEL, $OLLAMA_EMBED_MODEL ==="
-  # Prefer exec into compose service; fall back to host ollama
   if "${COMPOSE[@]}" ps --status running 2>/dev/null | grep -q ollama; then
     "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_MODEL" || true
     "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_EMBED_MODEL" || true
@@ -69,18 +67,25 @@ pull_models() {
     ollama pull "$OLLAMA_MODEL" || true
     ollama pull "$OLLAMA_EMBED_MODEL" || true
   else
-    echo "Ollama CLI not available yet; models can be pulled after stack is up:"
     echo "  docker compose exec ollama ollama pull $OLLAMA_MODEL"
     echo "  docker compose exec ollama ollama pull $OLLAMA_EMBED_MODEL"
   fi
 }
 
-cmd_start() {
-  echo "=== Pharmacy AI Assistant — starting full stack ==="
+require_docker() {
   if ! command -v docker >/dev/null 2>&1; then
     echo "ERROR: docker not found" >&2
     exit 1
   fi
+  if [[ ${#COMPOSE[@]} -eq 0 ]]; then
+    echo "ERROR: Docker Compose not found" >&2
+    exit 1
+  fi
+}
+
+cmd_start() {
+  echo "=== Pharmacy AI Assistant — starting local Docker stack ==="
+  require_docker
   ensure_env
   echo "=== Building and starting containers ==="
   "${COMPOSE[@]}" up --build -d
@@ -94,28 +99,26 @@ cmd_start() {
   echo "  Backend:   $BACKEND_URL/docs"
   echo "  Health:    $HEALTH_URL"
   echo "=============================================="
-  echo "Logs:  bash scripts/run.sh logs"
-  echo "Stop:  bash scripts/run.sh stop"
+  echo "AWS path (separate): bash scripts/run.sh aws preflight"
 }
 
 cmd_stop() {
+  require_docker
   echo "=== Stopping stack ==="
   "${COMPOSE[@]}" down
 }
 
 cmd_status() {
+  require_docker
   echo "=== Containers ==="
   "${COMPOSE[@]}" ps || true
   echo
   echo "=== Health ==="
-  if curl -sf "$HEALTH_URL"; then
-    echo
-  else
-    echo "Backend not reachable at $HEALTH_URL"
-  fi
+  if curl -sf "$HEALTH_URL"; then echo; else echo "Backend not reachable at $HEALTH_URL"; fi
 }
 
 cmd_logs() {
+  require_docker
   "${COMPOSE[@]}" logs -f --tail=200
 }
 
@@ -127,17 +130,20 @@ cmd_test() {
   fi
   (
     cd backend
+    export PYTHONPATH=.
     python3 -m pip install -q -r requirements.txt pytest python-multipart 2>/dev/null || true
     python3 -m pytest -q tests/test_expand_query.py tests/test_api_models.py tests/test_rag_helpers.py tests/test_integration_api.py
   )
 }
 
 cmd_aws() {
-  bash "$ROOT/scripts/aws_up.sh" "${1:-plan}"
+  local sub="${1:-plan}"
+  # Always go through aws_up.sh which sources preflight first
+  bash "$ROOT/scripts/aws_up.sh" "$sub"
 }
 
 usage() {
-  sed -n '2,12p' "$0"
+  sed -n '2,14p' "$0"
 }
 
 case "${1:-start}" in
