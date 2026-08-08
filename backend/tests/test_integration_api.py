@@ -4,6 +4,7 @@ Covers /api/chat, /api/meds/identify, /api/dea/query, health, validation, 503, i
 
 Heavy LLM/vector deps are stubbed so CI does not need Ollama or Chroma.
 """
+
 from __future__ import annotations
 
 import sys
@@ -16,7 +17,9 @@ import pytest
 # ---------------------------------------------------------------------------
 # Stub heavy optional deps BEFORE importing main / rag_service (CI-friendly)
 # ---------------------------------------------------------------------------
-def _stub(name: str):
+
+
+def _stub(name: str) -> ModuleType:
     if name not in sys.modules:
         sys.modules[name] = ModuleType(name)
     return sys.modules[name]
@@ -62,7 +65,7 @@ if str(BACKEND) not in sys.path:
 
 def _make_mock_rag(
     answer: str = "Educational answer about Schedule II.",
-    sources=None,
+    sources: list[str] | None = None,
 ):
     rag = MagicMock()
     rag.document_count.return_value = 3
@@ -85,8 +88,9 @@ def mock_rag():
 
 @pytest.fixture
 def client(mock_rag):
-    with patch("rag_service.PharmacyRAG", return_value=mock_rag), patch(
-        "main.PharmacyRAG", return_value=mock_rag
+    with (
+        patch("rag_service.PharmacyRAG", return_value=mock_rag),
+        patch("main.PharmacyRAG", return_value=mock_rag),
     ):
         import main as main_mod
 
@@ -99,7 +103,7 @@ def client(mock_rag):
 
 
 class TestHealth:
-    def test_health_ok(self, client, mock_rag):
+    def test_health_ok(self, client, mock_rag) -> None:
         c, _ = client
         r = c.get("/health")
         assert r.status_code == 200
@@ -107,7 +111,7 @@ class TestHealth:
         assert data["status"] == "healthy"
         assert data["documents_indexed"] == 3
 
-    def test_api_health_alias(self, client):
+    def test_api_health_alias(self, client) -> None:
         c, _ = client
         r = c.get("/api/health")
         assert r.status_code == 200
@@ -115,7 +119,7 @@ class TestHealth:
 
 
 class TestChat:
-    def test_chat_success(self, client, mock_rag):
+    def test_chat_success(self, client, mock_rag) -> None:
         c, _ = client
         r = c.post("/api/chat", json={"message": "What is Schedule II?"})
         assert r.status_code == 200
@@ -127,29 +131,29 @@ class TestChat:
         mock_rag.query.assert_called()
         assert mock_rag.query.call_args.kwargs["mode"] == "general"
 
-    def test_chat_empty_message_422(self, client):
+    def test_chat_empty_message_422(self, client) -> None:
         c, _ = client
         r = c.post("/api/chat", json={"message": ""})
         assert r.status_code == 422
 
-    def test_chat_blank_message_422(self, client):
+    def test_chat_blank_message_422(self, client) -> None:
         c, _ = client
         r = c.post("/api/chat", json={"message": "   "})
         assert r.status_code == 422
 
-    def test_chat_invalid_mode_422(self, client):
+    def test_chat_invalid_mode_422(self, client) -> None:
         c, _ = client
         r = c.post("/api/chat", json={"message": "hello", "mode": "hacker"})
         assert r.status_code == 422
 
-    def test_chat_too_long_422(self, client):
+    def test_chat_too_long_422(self, client) -> None:
         c, _ = client
         r = c.post("/api/chat", json={"message": "x" * 4001})
         assert r.status_code == 422
 
 
 class TestMedIdentify:
-    def test_identify_forces_med_id_mode(self, client, mock_rag):
+    def test_identify_forces_med_id_mode(self, client, mock_rag) -> None:
         c, _ = client
         r = c.post(
             "/api/meds/identify",
@@ -160,7 +164,7 @@ class TestMedIdentify:
         assert data["mode"] == "med_id"
         assert mock_rag.query.call_args.kwargs["mode"] == "med_id"
 
-    def test_identify_returns_answer(self, client, mock_rag):
+    def test_identify_returns_answer(self, client, mock_rag) -> None:
         c, _ = client
         r = c.post("/api/meds/identify", json={"message": "M367 white oval"})
         assert r.status_code == 200
@@ -168,7 +172,7 @@ class TestMedIdentify:
 
 
 class TestDeaQuery:
-    def test_dea_forces_dea_mode(self, client, mock_rag):
+    def test_dea_forces_dea_mode(self, client, mock_rag) -> None:
         c, _ = client
         r = c.post(
             "/api/dea/query",
@@ -178,7 +182,7 @@ class TestDeaQuery:
         assert r.json()["mode"] == "dea"
         assert mock_rag.query.call_args.kwargs["mode"] == "dea"
 
-    def test_dea_sources_present(self, client, mock_rag):
+    def test_dea_sources_present(self, client, mock_rag) -> None:
         c, _ = client
         mock_rag.query.return_value = {
             "answer": "No refills for Schedule II under federal rules (educational).",
@@ -193,13 +197,13 @@ class TestDeaQuery:
 
 
 class TestRagNotReady:
-    def test_chat_503_when_rag_none(self, client):
+    def test_chat_503_when_rag_none(self, client) -> None:
         c, main_mod = client
         main_mod.rag = None
         r = c.post("/api/chat", json={"message": "hello"})
         assert r.status_code == 503
 
-    def test_stats_503_when_rag_none(self, client):
+    def test_stats_503_when_rag_none(self, client) -> None:
         c, main_mod = client
         main_mod.rag = None
         r = c.get("/api/stats")
@@ -207,14 +211,14 @@ class TestRagNotReady:
 
 
 class TestStatsAndIngest:
-    def test_stats_ok(self, client, mock_rag):
+    def test_stats_ok(self, client, mock_rag) -> None:
         c, main_mod = client
         main_mod.rag = mock_rag
         r = c.get("/api/stats")
         assert r.status_code == 200
         assert r.json()["documents"] == 3
 
-    def test_ingest_empty_file_400(self, client, mock_rag):
+    def test_ingest_empty_file_400(self, client, mock_rag) -> None:
         c, main_mod = client
         main_mod.rag = mock_rag
         r = c.post(
@@ -222,7 +226,7 @@ class TestStatsAndIngest:
         )
         assert r.status_code == 400
 
-    def test_ingest_ok(self, client, mock_rag):
+    def test_ingest_ok(self, client, mock_rag) -> None:
         c, main_mod = client
         main_mod.rag = mock_rag
         r = c.post(
@@ -237,7 +241,7 @@ class TestStatsAndIngest:
 
 
 class TestQueryError:
-    def test_chat_500_on_rag_exception(self, client, mock_rag):
+    def test_chat_500_on_rag_exception(self, client, mock_rag) -> None:
         c, main_mod = client
         main_mod.rag = mock_rag
         mock_rag.query.side_effect = RuntimeError("boom")

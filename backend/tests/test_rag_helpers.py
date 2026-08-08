@@ -1,28 +1,30 @@
 """Lightweight tests for RAG helper edge cases without requiring Ollama."""
-import os
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
-import pytest
+import os
+from unittest.mock import MagicMock, patch
 
 
 class TestDocumentCountSafe:
-    def test_none_vectorstore_returns_zero(self):
+    def test_none_vectorstore_returns_zero(self) -> None:
         from rag_service import PharmacyRAG
 
-        with patch.object(PharmacyRAG, "_build_embeddings", return_value=MagicMock()), \
-             patch.object(PharmacyRAG, "_build_llm", return_value=MagicMock()), \
-             patch.object(PharmacyRAG, "_init_mem0", return_value=None):
+        with (
+            patch.object(PharmacyRAG, "_build_embeddings", return_value=MagicMock()),
+            patch.object(PharmacyRAG, "_build_llm", return_value=MagicMock()),
+            patch.object(PharmacyRAG, "_init_mem0", return_value=None),
+        ):
             rag = PharmacyRAG()
             rag.vectorstore = None
             assert rag.document_count() == 0
 
-    def test_vectorstore_count_exception_returns_zero(self):
+    def test_vectorstore_count_exception_returns_zero(self) -> None:
         from rag_service import PharmacyRAG
 
-        with patch.object(PharmacyRAG, "_build_embeddings", return_value=MagicMock()), \
-             patch.object(PharmacyRAG, "_build_llm", return_value=MagicMock()), \
-             patch.object(PharmacyRAG, "_init_mem0", return_value=None):
+        with (
+            patch.object(PharmacyRAG, "_build_embeddings", return_value=MagicMock()),
+            patch.object(PharmacyRAG, "_build_llm", return_value=MagicMock()),
+            patch.object(PharmacyRAG, "_init_mem0", return_value=None),
+        ):
             rag = PharmacyRAG()
             vs = MagicMock()
             vs._collection.count.side_effect = RuntimeError("broken")
@@ -31,12 +33,14 @@ class TestDocumentCountSafe:
 
 
 class TestSaveUpload:
-    def test_save_upload_writes_bytes(self, tmp_path):
+    def test_save_upload_writes_bytes(self, tmp_path) -> None:
         from rag_service import PharmacyRAG
 
-        with patch.object(PharmacyRAG, "_build_embeddings", return_value=MagicMock()), \
-             patch.object(PharmacyRAG, "_build_llm", return_value=MagicMock()), \
-             patch.object(PharmacyRAG, "_init_mem0", return_value=None):
+        with (
+            patch.object(PharmacyRAG, "_build_embeddings", return_value=MagicMock()),
+            patch.object(PharmacyRAG, "_build_llm", return_value=MagicMock()),
+            patch.object(PharmacyRAG, "_init_mem0", return_value=None),
+        ):
             rag = PharmacyRAG()
             os.environ["DATA_PATH"] = str(tmp_path)
             path = rag.save_upload("note.txt", b"Schedule II educational note")
@@ -46,12 +50,14 @@ class TestSaveUpload:
 
 
 class TestIngestEmpty:
-    def test_ingest_empty_txt_returns_zero(self, tmp_path):
+    def test_ingest_empty_txt_returns_zero(self, tmp_path) -> None:
         from rag_service import PharmacyRAG
 
-        with patch.object(PharmacyRAG, "_build_embeddings", return_value=MagicMock()), \
-             patch.object(PharmacyRAG, "_build_llm", return_value=MagicMock()), \
-             patch.object(PharmacyRAG, "_init_mem0", return_value=None):
+        with (
+            patch.object(PharmacyRAG, "_build_embeddings", return_value=MagicMock()),
+            patch.object(PharmacyRAG, "_build_llm", return_value=MagicMock()),
+            patch.object(PharmacyRAG, "_init_mem0", return_value=None),
+        ):
             rag = PharmacyRAG()
             rag.vectorstore = MagicMock()
             empty = tmp_path / "empty.txt"
