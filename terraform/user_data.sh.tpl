@@ -42,16 +42,14 @@ rm -rf "$APP_DIR"
 git clone --depth 1 --branch "${git_branch}" "${git_repo_url}" "$APP_DIR"
 cd "$APP_DIR"
 
-echo "=== Sync knowledge base FROM S3 (required at startup) ==="
+echo "=== Sync knowledge base FROM S3 ==="
 mkdir -p "$APP_DIR/backend/source_data"
 aws s3 sync "s3://$${DATA_BUCKET}/source_data/" "$APP_DIR/backend/source_data/" --region "$AWS_DEFAULT_REGION"
 ls -la "$APP_DIR/backend/source_data/"
 
-# Prove write path works — heartbeat object
-echo "boot $(date -Is) host $(hostname)" | aws s3 cp - "s3://$${DATA_BUCKET}/bootstrap/last_boot.txt" --region "$AWS_DEFAULT_REGION"
-echo "bootstrap ok" | aws s3 cp - "s3://$${LOGS_BUCKET}/ec2/$(hostname)-boot.txt" --region "$AWS_DEFAULT_REGION"
+echo "boot $(date -Is) host $(hostname)" | aws s3 cp - "s3://$${DATA_BUCKET}/bootstrap/last_boot.txt" --region "$AWS_DEFAULT_REGION" || true
+echo "bootstrap ok" | aws s3 cp - "s3://$${LOGS_BUCKET}/ec2/$(hostname)-boot.txt" --region "$AWS_DEFAULT_REGION" || true
 
-# Env for compose / app
 cat > "$APP_DIR/backend/.env" <<EOF
 LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://ollama:11434
@@ -63,25 +61,37 @@ S3_DATA_BUCKET=$${DATA_BUCKET}
 S3_LOGS_BUCKET=$${LOGS_BUCKET}
 DATA_PATH=/app/source_data
 CHROMA_PATH=/app/chroma_db
+OLLAMA_NUM_PREDICT=250
+RAG_TOP_K=3
 EOF
 
-echo "=== Docker Compose up ==="
+echo "=== Docker Compose: Ollama first ==="
 cd "$APP_DIR"
-docker compose up --build -d
+docker compose up -d ollama
+sleep 10
 
-echo "=== Pull Ollama models (may take several minutes) ==="
-sleep 8
-docker compose exec -T ollama ollama pull "${ollama_model}" || true
+echo "=== Pull Ollama models (required before Chroma index) ==="
 docker compose exec -T ollama ollama pull "${ollama_embed}" || true
+docker compose exec -T ollama ollama pull "${ollama_model}" || true
+docker compose exec -T ollama ollama list || true
 
-echo "=== Wait for API health ==="
+echo "=== Start backend + frontend (embeddings ready) ==="
+docker compose up --build -d backend frontend
+sleep 15
+# Second chance if backend raced Ollama on first boot
+docker compose restart backend || true
+sleep 10
+
+echo "=== Wait for API health (up to ~10 min on t3.micro) ==="
 for i in $(seq 1 60); do
   if curl -sf http://127.0.0.1:8000/api/health >/dev/null; then
     curl -s http://127.0.0.1:8000/api/health | tee /tmp/health.json
     aws s3 cp /tmp/health.json "s3://$${LOGS_BUCKET}/ec2/health-first.json" || true
+    echo "API healthy on attempt $i"
     break
   fi
-  sleep 5
+  echo "waiting for health ($i/60)..."
+  sleep 10
 done
 
 echo "=== Bootstrap complete ==="

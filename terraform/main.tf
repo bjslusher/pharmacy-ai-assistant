@@ -23,7 +23,6 @@ data "aws_vpc" "default" {
   default = true
 }
 
-# All default-VPC subnets (fallback)
 data "aws_subnets" "default" {
   filter {
     name   = "vpc-id"
@@ -31,7 +30,7 @@ data "aws_subnets" "default" {
   }
 }
 
-# Prefer AZs that commonly support t3.micro (exclude us-east-1e which often does not)
+# Prefer AZs that commonly support t3.micro (exclude us-east-1e)
 data "aws_subnets" "compute" {
   filter {
     name   = "vpc-id"
@@ -54,22 +53,13 @@ resource "random_id" "suffix" {
 }
 
 locals {
-  name_prefix = var.project_name
-  bucket_data = lower("${var.project_name}-data-${random_id.suffix.hex}")
-  bucket_logs = lower("${var.project_name}-logs-${random_id.suffix.hex}")
-  common_tags = {
-    Project     = var.project_name
-    ManagedBy   = "terraform"
-    Environment = var.environment
-  }
-  # Prefer compute-capable AZs; fall back to all default subnets if filter is empty
+  name_prefix    = var.project_name
+  bucket_data    = lower("${var.project_name}-data-${random_id.suffix.hex}")
+  bucket_logs    = lower("${var.project_name}-logs-${random_id.suffix.hex}")
+  common_tags    = { Project = var.project_name, ManagedBy = "terraform", Environment = var.environment }
   asg_subnet_ids = length(data.aws_subnets.compute.ids) >= 1 ? data.aws_subnets.compute.ids : data.aws_subnets.default.ids
   alb_subnet_ids = slice(local.asg_subnet_ids, 0, min(2, length(local.asg_subnet_ids)))
 }
-
-# ---------------------------------------------------------------------------
-# S3 via modules/s3_bucket
-# ---------------------------------------------------------------------------
 
 module "data_bucket" {
   source            = "./modules/s3_bucket"
@@ -114,11 +104,7 @@ resource "aws_iam_role" "ec2" {
   name = "${local.name_prefix}-ec2-role-${random_id.suffix.hex}"
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [{
-      Effect    = "Allow"
-      Principal = { Service = "ec2.amazonaws.com" }
-      Action    = "sts:AssumeRole"
-    }]
+    Statement = [{ Effect = "Allow", Principal = { Service = "ec2.amazonaws.com" }, Action = "sts:AssumeRole" }]
   })
   tags = local.common_tags
 }
@@ -129,21 +115,9 @@ resource "aws_iam_role_policy" "ec2_s3" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
-        Resource = [module.data_bucket.arn, module.logs_bucket.arn]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-        Resource = ["${module.data_bucket.arn}/*"]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["s3:PutObject", "s3:GetObject"]
-        Resource = ["${module.logs_bucket.arn}/*"]
-      }
+      { Effect = "Allow", Action = ["s3:ListBucket", "s3:GetBucketLocation"], Resource = [module.data_bucket.arn, module.logs_bucket.arn] },
+      { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource = ["${module.data_bucket.arn}/*"] },
+      { Effect = "Allow", Action = ["s3:PutObject", "s3:GetObject"], Resource = ["${module.logs_bucket.arn}/*"] }
     ]
   })
 }
@@ -158,18 +132,8 @@ resource "aws_security_group" "alb" {
   name        = "${local.name_prefix}-alb-sg-${random_id.suffix.hex}"
   description = "ALB public HTTP"
   vpc_id      = data.aws_vpc.default.id
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  ingress { from_port = 80 to_port = 80 protocol = "tcp" cidr_blocks = ["0.0.0.0/0"] }
+  egress { from_port = 0 to_port = 0 protocol = "-1" cidr_blocks = ["0.0.0.0/0"] }
   tags = merge(local.common_tags, { Name = "${local.name_prefix}-alb-sg" })
 }
 
@@ -177,62 +141,25 @@ resource "aws_security_group" "app" {
   name        = "${local.name_prefix}-app-sg-${random_id.suffix.hex}"
   description = "App instances from ALB"
   vpc_id      = data.aws_vpc.default.id
-  ingress {
-    from_port       = 3000
-    to_port         = 3000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
-  ingress {
-    from_port       = 8000
-    to_port         = 8000
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = var.allowed_ssh_cidrs
-  }
-  ingress {
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    from_port   = 8000
-    to_port     = 8000
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  ingress { from_port = 3000 to_port = 3000 protocol = "tcp" security_groups = [aws_security_group.alb.id] }
+  ingress { from_port = 8000 to_port = 8000 protocol = "tcp" security_groups = [aws_security_group.alb.id] }
+  ingress { from_port = 22 to_port = 22 protocol = "tcp" cidr_blocks = var.allowed_ssh_cidrs }
+  ingress { from_port = 3000 to_port = 3000 protocol = "tcp" cidr_blocks = ["0.0.0.0/0"] }
+  ingress { from_port = 8000 to_port = 8000 protocol = "tcp" cidr_blocks = ["0.0.0.0/0"] }
+  egress { from_port = 0 to_port = 0 protocol = "-1" cidr_blocks = ["0.0.0.0/0"] }
   tags = merge(local.common_tags, { Name = "${local.name_prefix}-app-sg" })
 }
 
 resource "aws_launch_template" "app" {
-  name_prefix   = "${local.name_prefix}-lt-"
-  image_id      = var.ami_id
-  instance_type = var.instance_type
-  key_name      = var.key_name != "" ? var.key_name : null
-  iam_instance_profile {
-    name = aws_iam_instance_profile.ec2.name
-  }
+  name_prefix            = "${local.name_prefix}-lt-"
+  image_id               = var.ami_id
+  instance_type          = var.instance_type
+  key_name               = var.key_name != "" ? var.key_name : null
   vpc_security_group_ids = [aws_security_group.app.id]
+  iam_instance_profile { name = aws_iam_instance_profile.ec2.name }
   block_device_mappings {
     device_name = "/dev/sda1"
-    ebs {
-      volume_size           = var.root_volume_gb
-      volume_type           = "gp3"
-      encrypted             = true
-      delete_on_termination = true
-    }
+    ebs { volume_size = var.root_volume_gb volume_type = "gp3" encrypted = true delete_on_termination = true }
   }
   user_data = base64encode(templatefile("${path.module}/user_data.sh.tpl", {
     aws_region   = var.aws_region
@@ -254,7 +181,6 @@ resource "aws_launch_template" "app" {
 
 resource "aws_autoscaling_group" "app" {
   name                      = "${local.name_prefix}-asg-${random_id.suffix.hex}"
-  # Only place instances in AZs that support t3.micro (excludes us-east-1e)
   vpc_zone_identifier       = local.asg_subnet_ids
   min_size                  = var.asg_min_size
   max_size                  = var.asg_max_size
@@ -264,23 +190,10 @@ resource "aws_autoscaling_group" "app" {
   force_delete              = true
   wait_for_capacity_timeout = "10m"
   target_group_arns         = [aws_lb_target_group.frontend.arn, aws_lb_target_group.backend.arn]
-  launch_template {
-    id      = aws_launch_template.app.id
-    version = "$Latest"
-  }
-  tag {
-    key                 = "Name"
-    value               = "${local.name_prefix}-asg"
-    propagate_at_launch = true
-  }
-  tag {
-    key                 = "Project"
-    value               = var.project_name
-    propagate_at_launch = true
-  }
-  lifecycle {
-    create_before_destroy = true
-  }
+  launch_template { id = aws_launch_template.app.id version = "$Latest" }
+  tag { key = "Name" value = "${local.name_prefix}-asg" propagate_at_launch = true }
+  tag { key = "Project" value = var.project_name propagate_at_launch = true }
+  lifecycle { create_before_destroy = true }
 }
 
 resource "aws_autoscaling_policy" "cpu_target" {
@@ -288,19 +201,19 @@ resource "aws_autoscaling_policy" "cpu_target" {
   autoscaling_group_name = aws_autoscaling_group.app.name
   policy_type            = "TargetTrackingScaling"
   target_tracking_configuration {
-    predefined_metric_specification {
-      predefined_metric_type = "ASGAverageCPUUtilization"
-    }
+    predefined_metric_specification { predefined_metric_type = "ASGAverageCPUUtilization" }
     target_value = var.asg_cpu_target
   }
 }
 
+# Idle timeout must exceed slow Ollama RAG on t3.micro (local often takes 30–120s+)
 resource "aws_lb" "app" {
   name               = "${substr(local.name_prefix, 0, 12)}-${random_id.suffix.hex}"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = local.alb_subnet_ids
+  idle_timeout       = 300
   tags               = merge(local.common_tags, { Name = "${local.name_prefix}-alb" })
 }
 
@@ -324,10 +237,11 @@ resource "aws_lb_target_group" "frontend" {
 }
 
 resource "aws_lb_target_group" "backend" {
-  name     = "${substr(local.name_prefix, 0, 10)}-be-${random_id.suffix.hex}"
-  port     = 8000
-  protocol = "HTTP"
-  vpc_id   = data.aws_vpc.default.id
+  name                 = "${substr(local.name_prefix, 0, 10)}-be-${random_id.suffix.hex}"
+  port                 = 8000
+  protocol             = "HTTP"
+  vpc_id               = data.aws_vpc.default.id
+  deregistration_delay = 30
   health_check {
     enabled             = true
     path                = "/api/health"
@@ -360,52 +274,21 @@ resource "aws_lb_listener_rule" "api" {
     target_group_arn = aws_lb_target_group.backend.arn
   }
   condition {
-    path_pattern {
-      values = ["/api/*", "/docs", "/openapi.json", "/redoc"]
-    }
+    path_pattern { values = ["/api/*", "/docs", "/openapi.json", "/redoc"] }
   }
 }
 
-output "alb_dns_name" {
-  value = aws_lb.app.dns_name
-}
-output "frontend_url" {
-  value = "http://${aws_lb.app.dns_name}"
-}
-output "backend_url" {
-  value = "http://${aws_lb.app.dns_name}"
-}
-output "health_url" {
-  value = "http://${aws_lb.app.dns_name}/api/health"
-}
-output "asg_name" {
-  value = aws_autoscaling_group.app.name
-}
-output "asg_desired_capacity" {
-  value = aws_autoscaling_group.app.desired_capacity
-}
-output "launch_template_id" {
-  value = aws_launch_template.app.id
-}
-output "s3_data_bucket" {
-  value = module.data_bucket.id
-}
-output "s3_logs_bucket" {
-  value = module.logs_bucket.id
-}
-output "aws_profile_used" {
-  value = var.aws_profile
-}
-output "asg_subnet_ids" {
-  description = "Subnets used for ASG (AZ-filtered for t3.micro support)"
-  value       = local.asg_subnet_ids
-}
-output "security_group_app_id" {
-  value = aws_security_group.app.id
-}
-output "security_group_alb_id" {
-  value = aws_security_group.alb.id
-}
-output "ssh_hint" {
-  value = var.key_name != "" ? "ssh -i <key.pem> ubuntu@<ip>" : "Set key_name to enable SSH"
-}
+output "alb_dns_name" { value = aws_lb.app.dns_name }
+output "frontend_url" { value = "http://${aws_lb.app.dns_name}" }
+output "backend_url" { value = "http://${aws_lb.app.dns_name}" }
+output "health_url" { value = "http://${aws_lb.app.dns_name}/api/health" }
+output "asg_name" { value = aws_autoscaling_group.app.name }
+output "asg_desired_capacity" { value = aws_autoscaling_group.app.desired_capacity }
+output "launch_template_id" { value = aws_launch_template.app.id }
+output "s3_data_bucket" { value = module.data_bucket.id }
+output "s3_logs_bucket" { value = module.logs_bucket.id }
+output "aws_profile_used" { value = var.aws_profile }
+output "asg_subnet_ids" { value = local.asg_subnet_ids }
+output "security_group_app_id" { value = aws_security_group.app.id }
+output "security_group_alb_id" { value = aws_security_group.alb.id }
+output "ssh_hint" { value = var.key_name != "" ? "ssh -i <key.pem> ubuntu@<ip>" : "Set key_name to enable SSH" }
