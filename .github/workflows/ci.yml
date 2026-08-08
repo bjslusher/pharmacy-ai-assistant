@@ -8,6 +8,7 @@ on:
 
 jobs:
   backend:
+    name: Backend tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -26,12 +27,13 @@ jobs:
         run: python -m py_compile main.py prompts.py rag_service.py
       - name: Unit tests
         run: |
-          # expand_query + model tests do not need live Ollama
+          # No live Ollama required — expand_query + model tests are pure unit tests
           pytest -q tests/test_expand_query.py tests/test_api_models.py
-          # RAG helper tests mock embeddings/LLM
-          pytest -q tests/test_rag_helpers.py || true
+          # RAG helpers mock embeddings/LLM
+          pytest -q tests/test_rag_helpers.py
 
   frontend:
+    name: Frontend build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -45,3 +47,13 @@ jobs:
         run: |
           npm ci || npm install
           npm run build
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build backend image
+        run: docker build -t pharmacy-backend:ci ./backend
+      - name: Build frontend image
+        run: docker build -t pharmacy-frontend:ci ./frontend

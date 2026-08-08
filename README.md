@@ -18,8 +18,8 @@ Built for the AICO Assessment III requirements (RAG + Mem0, Docker, Terraform, G
 - Optional local Ollama or cloud LLM
 - Optional Mem0 memory
 - Docker Compose local stack
-- Terraform AWS scaffolding (to be completed)
-- GitHub Actions CI / deploy / destroy workflows (to be completed)
+- Terraform AWS scaffolding (EC2 + security group)
+- GitHub Actions CI / deploy / destroy workflows
 
 ## Architecture
 
@@ -74,9 +74,98 @@ Educational seed documents live in `backend/source_data/`:
 | File | Content |
 |------|---------|
 | `common_controlled_imprints.txt` | Expanded common Schedule II / III / IV tablet imprint examples |
-| Additional DEA schedule & corresponding-responsibility summaries | Add as needed |
+| `dea_schedules_overview.txt` | Schedules I–V + corresponding responsibility overview |
+| `pharmacist_responsibilities.txt` | Corresponding responsibility and compliance notes |
 
 **Imprint identification is limited to the educational examples in the seed data.** It is not a live commercial pill identifier. Unknown codes will be refused or answered with low confidence and a redirect to official tools.
+
+## CI/CD Pipeline
+
+This project uses **GitHub Actions** for continuous integration, deployment planning, and infrastructure teardown. All workflows live under `.github/workflows/`.
+
+### Pipeline overview
+
+```mermaid
+flowchart TB
+  subgraph triggers [Triggers]
+    Push[Push to main]
+    PR[Pull Request]
+    Manual[workflow_dispatch]
+  end
+
+  subgraph ci [CI – ci.yml]
+    Checkout1[Checkout code]
+    Backend[Backend: Python 3.12 + pytest]
+    Frontend[Frontend: Node 20 build]
+    Docker[Docker image builds]
+    Checkout1 --> Backend
+    Checkout1 --> Frontend
+    Checkout1 --> Docker
+  end
+
+  subgraph deploy [Deploy – deploy.yml]
+    Checkout2[Checkout code]
+    TfInit[Terraform init]
+    TfPlan[Terraform plan]
+    Checkout2 --> TfInit --> TfPlan
+  end
+
+  subgraph destroy [Destroy – destroy.yml]
+    Checkout3[Checkout code]
+    TfInit2[Terraform init]
+    TfDestroy[Terraform destroy]
+    Checkout3 --> TfInit2 --> TfDestroy
+  end
+
+  Push --> ci
+  PR --> ci
+  Push --> deploy
+  Manual --> deploy
+  Manual --> destroy
+```
+
+### What each workflow does
+
+| Workflow | File | When it runs | What it does |
+|----------|------|--------------|--------------|
+| **CI** | `ci.yml` | Every **push** and **pull request** to `main` | Installs Python deps, compiles backend modules, runs unit tests (`expand_query`, API models, RAG helpers — no live Ollama), installs frontend deps and builds the Vite app, builds backend and frontend Docker images to prove they still compile |
+| **Deploy** | `deploy.yml` | **Manual** (`workflow_dispatch`) or push that touches app/infra paths | Checks out code, sets up Terraform, runs `terraform init` + `validate` + `plan` using optional AWS secrets. **Plan-first by design** — no automatic apply, so assessment reviewers cannot accidentally create paid cloud resources |
+| **Destroy** | `destroy.yml` | **Manual only** (`workflow_dispatch`) | Runs `terraform destroy` when AWS secrets are present; otherwise exits safely as a scaffold. Prevents accidental teardown from a normal push |
+
+### Required GitHub secrets (deploy / destroy only)
+
+| Secret | Purpose |
+|--------|---------|
+| `AWS_ACCESS_KEY_ID` | AWS credentials for Terraform |
+| `AWS_SECRET_ACCESS_KEY` | AWS credentials for Terraform |
+| `AWS_REGION` | Optional; defaults to `us-east-1` if unset |
+
+CI does **not** need AWS secrets; it only builds and tests.
+
+### Local equivalents of CI
+
+```bash
+# Backend unit tests (no live LLM required)
+cd backend
+pip install -r requirements.txt pytest
+pytest -q tests/
+
+# Frontend build
+cd frontend
+npm ci || npm install
+npm run build
+
+# Docker proof
+docker build -t pharmacy-backend ./backend
+docker build -t pharmacy-frontend ./frontend
+```
+
+### Design notes
+
+- **CI is fast and offline-friendly** — unit tests mock embeddings/LLM where needed so the pipeline does not depend on a live Ollama service.
+- **Deploy is plan-first** — avoids accidental infrastructure changes during assessment review.
+- **Destroy is manual-only** — prevents accidental teardown from a normal push.
+- **Single pusher process** — team drafts workflow changes; Grok reviews, tests, and is the only agent that commits updates to `main`.
 
 ## Official Sources (do not commit full PDFs)
 
@@ -97,16 +186,19 @@ Educational seed documents live in `backend/source_data/`:
 | openFDA NDC API | https://open.fda.gov/apis/drug/ndc/ |
 | DailyMed | https://dailymed.nlm.nih.gov/dailymed/ |
 
-## Assessment Mapping (approximate)
+See also [`docs/sources.md`](docs/sources.md).
+
+## Assessment Mapping
 
 | Area | Coverage |
 |------|----------|
 | RAG / LangChain / Mem0 | `backend/rag_service.py`, pharmacy prompts, Chroma, optional Mem0 |
 | Docker | `backend/Dockerfile`, `frontend/Dockerfile`, `docker-compose.yml` |
-| Terraform (AWS) | Scaffolding to be completed |
-| CI/CD (GitHub Actions) | Workflows to be completed |
-| Domain specialization | Pharmacy prompts, expanded imprint seed data, DEA educational focus |
-| Documentation | This README + official source links |
+| Terraform (AWS) | `terraform/main.tf`, `terraform/variables.tf` |
+| CI/CD (GitHub Actions) | `ci.yml`, `deploy.yml`, `destroy.yml` |
+| Tests | `backend/tests/` (expand_query, API models, RAG helpers) |
+| Domain specialization | Pharmacy prompts, imprint seed data, DEA educational focus |
+| Documentation | This README + `docs/sources.md` |
 
 ## Important Limitations
 

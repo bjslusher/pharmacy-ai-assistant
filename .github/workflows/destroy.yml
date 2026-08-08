@@ -5,10 +5,31 @@ on:
 
 jobs:
   destroy:
+    name: Terraform destroy
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
     steps:
       - uses: actions/checkout@v4
-      - name: Destroy scaffold
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.7"
+      - name: Terraform init
+        run: terraform init -input=false
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
+      - name: Terraform destroy
         run: |
-          echo "Destroy workflow (bonus)."
-          echo "Would run terraform destroy or tear down containers/resources."
+          echo "Destroy is manual-only (workflow_dispatch)."
+          if [ -z "$AWS_ACCESS_KEY_ID" ]; then
+            echo "AWS secrets not set — skipping real destroy (scaffold only)."
+            exit 0
+          fi
+          terraform destroy -auto-approve -input=false
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION || 'us-east-1' }}
