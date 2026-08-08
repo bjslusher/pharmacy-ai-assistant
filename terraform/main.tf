@@ -8,8 +8,13 @@ terraform {
   }
 }
 
+# Profile is resolved on the machine that runs Terraform:
+#   1) TF_VAR_aws_profile / -var aws_profile=...
+#   2) scripts/detect_aws_profile.py  (prefers brian, then default)
+#   3) empty → AWS SDK default chain (env keys, instance role, etc.)
 provider "aws" {
-  region = var.aws_region
+  region  = var.aws_region
+  profile = var.aws_profile != "" ? var.aws_profile : null
 }
 
 resource "aws_security_group" "pharmacy_ai" {
@@ -74,4 +79,9 @@ output "instance_public_ip" {
 
 output "security_group_id" {
   value = aws_security_group.pharmacy_ai.id
+}
+
+output "aws_profile_used" {
+  description = "Named profile passed into the AWS provider (empty = default credential chain)"
+  value       = var.aws_profile
 }

@@ -1,6 +1,13 @@
 variable "aws_region" {
-  type    = string
-  default = "us-east-1"
+  type        = string
+  description = "AWS region for resources"
+  default     = "us-east-1"
+}
+
+variable "aws_profile" {
+  type        = string
+  description = "Named AWS shared config/credentials profile (e.g. brian or default). Leave empty to use the default AWS credential chain. Prefer scripts/detect_aws_profile.py when running locally."
+  default     = ""
 }
 
 variable "project_name" {
@@ -20,11 +27,13 @@ variable "ami_id" {
 }
 
 variable "key_name" {
-  type    = string
-  default = ""
+  type        = string
+  description = "Optional EC2 key pair name"
+  default     = ""
 }
 
 variable "allowed_ssh_cidrs" {
-  type    = list(string)
-  default = ["0.0.0.0/0"]
+  type        = list(string)
+  description = "CIDRs allowed to SSH (tighten in real use)"
+  default     = ["0.0.0.0/0"]
 }

@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars (gitignored) or pass -var on the CLI.
+# Prefer: eval $(python3 scripts/detect_aws_profile.py --export)
+
+aws_region  = "us-east-1"
+# aws_profile = "brian"   # or "default" — leave unset to auto-detect via scripts/aws_up.sh
+# key_name  = "your-ec2-keypair"
+# instance_type = "t3.medium"
