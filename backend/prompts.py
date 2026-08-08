@@ -28,7 +28,8 @@ RAG_PROMPT = ChatPromptTemplate.from_messages(
             "system",
             SYSTEM_PHARMACY
             + "\n\nRetrieved knowledge-base context (Chroma similarity search):\n{context}\n\n"
-            + "If context is insufficient, say so. Do not invent schedules or imprints.",
+            + "If context is insufficient, say so. Do not invent schedules or imprints. "
+            + "When an imprint code (e.g. M367) appears in the context with a drug name, report that match.",
         ),
         ("human", "{question}"),
     ]
@@ -42,8 +43,11 @@ User query: {query}
 Retrieved Chroma context:
 {context}
 
-If the imprint/name is not in the context, say the knowledge base has no match.
-Otherwise list brand/generic, strength, schedule if present in context, and caveats.
+Instructions:
+- Scan the context for the exact imprint code the user mentioned (e.g. M367, M 367).
+- If found, report: drug name (brand/generic if present), strength, DEA schedule if stated, and that this is educational seed data.
+- If the imprint is not in the context, say the knowledge base has no match for that code.
+- Do not invent imprints that are not written in the context.
 """
 )
 
@@ -73,30 +77,56 @@ TERM_ALIASES = {
     "fent": "fentanyl",
     "methadone": "methadone",
     "suboxone": "buprenorphine naloxone",
-    "schedule 2": "Schedule II",
-    "schedule ii": "Schedule II",
-    "c2": "Schedule II",
-    "cii": "Schedule II",
-    "c3": "Schedule III",
-    "ciii": "Schedule III",
-    "dea number": "DEA registration number",
-    "ndc": "National Drug Code",
-    "imprint": "tablet imprint code",
+    "perc": "oxycodone acetaminophen",
+    "hydro": "hydrocodone",
 }
+
+# Tablet imprint codes in seed data (boost retrieval when user types the code)
+IMPRINT_BOOST = {
+    "m367": "imprint M367 hydrocodone bitartrate 10 mg acetaminophen 325 mg Schedule II white oval",
+    "m366": "imprint M366 hydrocodone 7.5 mg acetaminophen 325 mg",
+    "m365": "imprint M365 hydrocodone 5 mg acetaminophen 325 mg",
+    "oc 10": "imprint OC 10 OxyContin oxycodone extended-release",
+    "oc 20": "imprint OC 20 OxyContin oxycodone extended-release",
+    "oc 40": "imprint OC 40 OxyContin oxycodone extended-release",
+    "oc 80": "imprint OC 80 OxyContin oxycodone extended-release",
+}
+
+# Alphanumeric imprint-like tokens (e.g. M367, AD10, alza18)
+_IMPRINT_TOKEN = re.compile(r"\b([A-Za-z]{1,4}\s?\d{2,4}|\d{2,4}\s?[A-Za-z]{1,4})\b")
 
 
 def expand_query(query: str) -> str:
+    """Expand slang + imprint codes so Chroma similarity ranks the right seed chunks."""
     if not query or not str(query).strip():
         return query
     lower = query.lower()
-    expansions = []
-    seen = set()
+    expansions: list[str] = []
+    seen: set[str] = set()
+
     items = sorted(TERM_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True)
     for alias, formal in items:
         pattern = r"(?<!\w)" + re.escape(alias) + r"(?!\w)"
         if re.search(pattern, lower) and formal not in seen:
             expansions.append(formal)
             seen.add(formal)
+
+    # Explicit imprint boost map
+    for code, boost in IMPRINT_BOOST.items():
+        if re.search(r"(?<!\w)" + re.escape(code).replace(r"\ ", r"\s*") + r"(?!\w)", lower):
+            if boost not in seen:
+                expansions.append(boost)
+                seen.add(boost)
+
+    # Generic imprint token → "imprint CODE identification"
+    for m in _IMPRINT_TOKEN.finditer(query):
+        token = m.group(1)
+        compact = re.sub(r"\s+", "", token).upper()
+        boost = f"imprint code {token} {compact} tablet identification"
+        if boost not in seen:
+            expansions.append(boost)
+            seen.add(boost)
+
     if expansions:
-        return f"{query} ({', '.join(expansions)})"
-    return query
+        return f"{query.strip()} | " + " | ".join(expansions)
+    return query.strip()

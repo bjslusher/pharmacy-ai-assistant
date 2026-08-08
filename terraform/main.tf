@@ -12,7 +12,6 @@ terraform {
   }
 }
 
-# Profile: TF_VAR_aws_profile / -var / detect script / default credential chain
 provider "aws" {
   region  = var.aws_region
   profile = var.aws_profile != "" ? var.aws_profile : null
@@ -24,10 +23,29 @@ data "aws_vpc" "default" {
   default = true
 }
 
+# All default-VPC subnets (fallback)
 data "aws_subnets" "default" {
   filter {
     name   = "vpc-id"
     values = [data.aws_vpc.default.id]
+  }
+}
+
+# Prefer AZs that commonly support t3.micro (exclude us-east-1e which often does not)
+data "aws_subnets" "compute" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default.id]
+  }
+  filter {
+    name = "availability-zone"
+    values = [
+      "${var.aws_region}a",
+      "${var.aws_region}b",
+      "${var.aws_region}c",
+      "${var.aws_region}d",
+      "${var.aws_region}f",
+    ]
   }
 }
 
@@ -44,71 +62,39 @@ locals {
     ManagedBy   = "terraform"
     Environment = var.environment
   }
-  # ALB needs >= 2 subnets in different AZs
-  alb_subnet_ids = slice(data.aws_subnets.default.ids, 0, min(2, length(data.aws_subnets.default.ids)))
+  # Prefer compute-capable AZs; fall back to all default subnets if filter is empty
+  asg_subnet_ids = length(data.aws_subnets.compute.ids) >= 1 ? data.aws_subnets.compute.ids : data.aws_subnets.default.ids
+  alb_subnet_ids = slice(local.asg_subnet_ids, 0, min(2, length(local.asg_subnet_ids)))
 }
 
 # ---------------------------------------------------------------------------
-# S3 - seed knowledge + logs
+# S3 via modules/s3_bucket
 # ---------------------------------------------------------------------------
 
-resource "aws_s3_bucket" "data" {
-  bucket        = local.bucket_data
+module "data_bucket" {
+  source            = "./modules/s3_bucket"
+  bucket_name       = local.bucket_data
+  force_destroy     = var.force_destroy_buckets
+  enable_versioning = true
+  tags              = merge(local.common_tags, { Name = "${local.name_prefix}-data", Role = "app-data" })
+}
+
+module "logs_bucket" {
+  source        = "./modules/s3_bucket"
+  bucket_name   = local.bucket_logs
   force_destroy = var.force_destroy_buckets
-  tags = merge(local.common_tags, { Name = "${local.name_prefix}-data", Role = "app-data" })
-}
-
-resource "aws_s3_bucket" "logs" {
-  bucket        = local.bucket_logs
-  force_destroy = var.force_destroy_buckets
-  tags = merge(local.common_tags, { Name = "${local.name_prefix}-logs", Role = "access-logs" })
-}
-
-resource "aws_s3_bucket_public_access_block" "data" {
-  bucket                  = aws_s3_bucket.data.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_public_access_block" "logs" {
-  bucket                  = aws_s3_bucket.logs.id
-  block_public_acls       = true
-  block_public_policy     = true
-  ignore_public_acls      = true
-  restrict_public_buckets = true
-}
-
-resource "aws_s3_bucket_versioning" "data" {
-  bucket = aws_s3_bucket.data.id
-  versioning_configuration { status = "Enabled" }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "data" {
-  bucket = aws_s3_bucket.data.id
-  rule {
-    apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
-  }
-}
-
-resource "aws_s3_bucket_server_side_encryption_configuration" "logs" {
-  bucket = aws_s3_bucket.logs.id
-  rule {
-    apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
-  }
+  tags          = merge(local.common_tags, { Name = "${local.name_prefix}-logs", Role = "access-logs" })
 }
 
 resource "aws_s3_bucket_logging" "data" {
-  bucket        = aws_s3_bucket.data.id
-  target_bucket = aws_s3_bucket.logs.id
-  target_prefix = "s3-access/${aws_s3_bucket.data.id}/"
+  bucket        = module.data_bucket.id
+  target_bucket = module.logs_bucket.id
+  target_prefix = "s3-access/${module.data_bucket.id}/"
 }
 
 resource "aws_s3_object" "seed_docs" {
-  for_each = fileset("${path.module}/../backend/source_data", "*.txt")
-
-  bucket       = aws_s3_bucket.data.id
+  for_each     = fileset("${path.module}/../backend/source_data", "*.txt")
+  bucket       = module.data_bucket.id
   key          = "source_data/${each.value}"
   source       = "${path.module}/../backend/source_data/${each.value}"
   etag         = filemd5("${path.module}/../backend/source_data/${each.value}")
@@ -117,20 +103,12 @@ resource "aws_s3_object" "seed_docs" {
 }
 
 resource "aws_s3_object" "bootstrap_marker" {
-  bucket       = aws_s3_bucket.data.id
+  bucket       = module.data_bucket.id
   key          = "bootstrap/README.txt"
-  content      = <<-EOT
-    Pharmacy AI Assistant - S3 data bucket
-    Seed docs under source_data/
-    EC2/ASG user_data: aws s3 sync to app source_data, then docker compose
-  EOT
+  content      = "Pharmacy AI Assistant seed data bucket.\n"
   content_type = "text/plain"
   tags         = local.common_tags
 }
-
-# ---------------------------------------------------------------------------
-# IAM - instance role for S3
-# ---------------------------------------------------------------------------
 
 resource "aws_iam_role" "ec2" {
   name = "${local.name_prefix}-ec2-role-${random_id.suffix.hex}"
@@ -152,23 +130,20 @@ resource "aws_iam_role_policy" "ec2_s3" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "ListBuckets"
         Effect   = "Allow"
         Action   = ["s3:ListBucket", "s3:GetBucketLocation"]
-        Resource = [aws_s3_bucket.data.arn, aws_s3_bucket.logs.arn]
+        Resource = [module.data_bucket.arn, module.logs_bucket.arn]
       },
       {
-        Sid      = "DataObjects"
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-        Resource = ["${aws_s3_bucket.data.arn}/*"]
+        Resource = ["${module.data_bucket.arn}/*"]
       },
       {
-        Sid      = "WriteLogs"
         Effect   = "Allow"
         Action   = ["s3:PutObject", "s3:GetObject"]
-        Resource = ["${aws_s3_bucket.logs.arn}/*"]
-      },
+        Resource = ["${module.logs_bucket.arn}/*"]
+      }
     ]
   })
 }
@@ -179,105 +154,77 @@ resource "aws_iam_instance_profile" "ec2" {
   tags = local.common_tags
 }
 
-# ---------------------------------------------------------------------------
-# Security groups - ALB + app instances
-# NOTE: description must be ASCII only (AWS CreateSecurityGroup rejects unicode)
-# ---------------------------------------------------------------------------
-
 resource "aws_security_group" "alb" {
   name        = "${local.name_prefix}-alb-sg-${random_id.suffix.hex}"
-  description = "ALB - public HTTP"
+  description = "ALB public HTTP"
   vpc_id      = data.aws_vpc.default.id
-
   ingress {
-    description = "HTTP"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
   tags = merge(local.common_tags, { Name = "${local.name_prefix}-alb-sg" })
 }
 
 resource "aws_security_group" "app" {
   name        = "${local.name_prefix}-app-sg-${random_id.suffix.hex}"
-  description = "App instances - traffic from ALB and optional SSH"
+  description = "App instances from ALB"
   vpc_id      = data.aws_vpc.default.id
-
   ingress {
-    description     = "Frontend from ALB"
     from_port       = 3000
     to_port         = 3000
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }
-
   ingress {
-    description     = "Backend API from ALB"
     from_port       = 8000
     to_port         = 8000
     protocol        = "tcp"
     security_groups = [aws_security_group.alb.id]
   }
-
   ingress {
-    description = "SSH"
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = var.allowed_ssh_cidrs
   }
-
   ingress {
-    description = "Direct frontend (demo)"
     from_port   = 3000
     to_port     = 3000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
   ingress {
-    description = "Direct backend (demo)"
     from_port   = 8000
     to_port     = 8000
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
   egress {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
   }
-
   tags = merge(local.common_tags, { Name = "${local.name_prefix}-app-sg" })
 }
-
-# ---------------------------------------------------------------------------
-# Launch template + Auto Scaling Group (demo scale 1-2)
-# ---------------------------------------------------------------------------
 
 resource "aws_launch_template" "app" {
   name_prefix   = "${local.name_prefix}-lt-"
   image_id      = var.ami_id
   instance_type = var.instance_type
   key_name      = var.key_name != "" ? var.key_name : null
-
   iam_instance_profile {
     name = aws_iam_instance_profile.ec2.name
   }
-
   vpc_security_group_ids = [aws_security_group.app.id]
-
   block_device_mappings {
     device_name = "/dev/sda1"
     ebs {
@@ -287,64 +234,50 @@ resource "aws_launch_template" "app" {
       delete_on_termination = true
     }
   }
-
   user_data = base64encode(templatefile("${path.module}/user_data.sh.tpl", {
     aws_region   = var.aws_region
-    data_bucket  = aws_s3_bucket.data.id
-    logs_bucket  = aws_s3_bucket.logs.id
+    data_bucket  = module.data_bucket.id
+    logs_bucket  = module.logs_bucket.id
     project_name = var.project_name
     git_repo_url = var.git_repo_url
     git_branch   = var.git_branch
     ollama_model = var.ollama_model
     ollama_embed = var.ollama_embed_model
   }))
-
   tag_specifications {
     resource_type = "instance"
-    tags = merge(local.common_tags, { Name = "${local.name_prefix}-asg-instance" })
+    tags          = merge(local.common_tags, { Name = "${local.name_prefix}-asg-instance" })
   }
-
-  tags = local.common_tags
-
-  depends_on = [
-    aws_s3_object.seed_docs,
-    aws_iam_role_policy.ec2_s3,
-  ]
+  tags       = local.common_tags
+  depends_on = [aws_s3_object.seed_docs, aws_iam_role_policy.ec2_s3]
 }
 
 resource "aws_autoscaling_group" "app" {
   name                      = "${local.name_prefix}-asg-${random_id.suffix.hex}"
-  vpc_zone_identifier       = data.aws_subnets.default.ids
+  # Only place instances in AZs that support t3.micro (excludes us-east-1e)
+  vpc_zone_identifier       = local.asg_subnet_ids
   min_size                  = var.asg_min_size
   max_size                  = var.asg_max_size
   desired_capacity          = var.asg_desired_capacity
   health_check_type         = "ELB"
   health_check_grace_period = var.asg_health_check_grace_seconds
-  # Faster demo teardown: do not block destroy on full instance termination wait
   force_delete              = true
   wait_for_capacity_timeout = "10m"
-  target_group_arns = [
-    aws_lb_target_group.frontend.arn,
-    aws_lb_target_group.backend.arn,
-  ]
-
+  target_group_arns         = [aws_lb_target_group.frontend.arn, aws_lb_target_group.backend.arn]
   launch_template {
     id      = aws_launch_template.app.id
     version = "$Latest"
   }
-
   tag {
     key                 = "Name"
     value               = "${local.name_prefix}-asg"
     propagate_at_launch = true
   }
-
   tag {
     key                 = "Project"
     value               = var.project_name
     propagate_at_launch = true
   }
-
   lifecycle {
     create_before_destroy = true
   }
@@ -354,7 +287,6 @@ resource "aws_autoscaling_policy" "cpu_target" {
   name                   = "${local.name_prefix}-cpu-target"
   autoscaling_group_name = aws_autoscaling_group.app.name
   policy_type            = "TargetTrackingScaling"
-
   target_tracking_configuration {
     predefined_metric_specification {
       predefined_metric_type = "ASGAverageCPUUtilization"
@@ -363,18 +295,13 @@ resource "aws_autoscaling_policy" "cpu_target" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Application Load Balancer - path routing /api* -> backend, else -> frontend
-# ---------------------------------------------------------------------------
-
 resource "aws_lb" "app" {
   name               = "${substr(local.name_prefix, 0, 12)}-${random_id.suffix.hex}"
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
   subnets            = local.alb_subnet_ids
-
-  tags = merge(local.common_tags, { Name = "${local.name_prefix}-alb" })
+  tags               = merge(local.common_tags, { Name = "${local.name_prefix}-alb" })
 }
 
 resource "aws_lb_target_group" "frontend" {
@@ -382,7 +309,6 @@ resource "aws_lb_target_group" "frontend" {
   port     = 3000
   protocol = "HTTP"
   vpc_id   = data.aws_vpc.default.id
-
   health_check {
     enabled             = true
     path                = "/"
@@ -394,7 +320,6 @@ resource "aws_lb_target_group" "frontend" {
     interval            = 30
     matcher             = "200-399"
   }
-
   tags = local.common_tags
 }
 
@@ -403,7 +328,6 @@ resource "aws_lb_target_group" "backend" {
   port     = 8000
   protocol = "HTTP"
   vpc_id   = data.aws_vpc.default.id
-
   health_check {
     enabled             = true
     path                = "/api/health"
@@ -415,7 +339,6 @@ resource "aws_lb_target_group" "backend" {
     interval            = 30
     matcher             = "200"
   }
-
   tags = local.common_tags
 }
 
@@ -423,7 +346,6 @@ resource "aws_lb_listener" "http" {
   load_balancer_arn = aws_lb.app.arn
   port              = 80
   protocol          = "HTTP"
-
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.frontend.arn
@@ -433,12 +355,10 @@ resource "aws_lb_listener" "http" {
 resource "aws_lb_listener_rule" "api" {
   listener_arn = aws_lb_listener.http.arn
   priority     = 10
-
   action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.backend.arn
   }
-
   condition {
     path_pattern {
       values = ["/api/*", "/docs", "/openapi.json", "/redoc"]
@@ -446,61 +366,46 @@ resource "aws_lb_listener_rule" "api" {
   }
 }
 
-# ---------------------------------------------------------------------------
-# Outputs
-# ---------------------------------------------------------------------------
-
 output "alb_dns_name" {
-  description = "Application Load Balancer DNS - preferred public entrypoint"
-  value       = aws_lb.app.dns_name
+  value = aws_lb.app.dns_name
 }
-
 output "frontend_url" {
-  description = "UI via ALB (port 80)"
-  value       = "http://${aws_lb.app.dns_name}"
+  value = "http://${aws_lb.app.dns_name}"
 }
-
 output "backend_url" {
-  description = "API via ALB path /api"
-  value       = "http://${aws_lb.app.dns_name}"
+  value = "http://${aws_lb.app.dns_name}"
 }
-
 output "health_url" {
   value = "http://${aws_lb.app.dns_name}/api/health"
 }
-
 output "asg_name" {
   value = aws_autoscaling_group.app.name
 }
-
 output "asg_desired_capacity" {
   value = aws_autoscaling_group.app.desired_capacity
 }
-
 output "launch_template_id" {
   value = aws_launch_template.app.id
 }
-
 output "s3_data_bucket" {
-  value = aws_s3_bucket.data.id
+  value = module.data_bucket.id
 }
-
 output "s3_logs_bucket" {
-  value = aws_s3_bucket.logs.id
+  value = module.logs_bucket.id
 }
-
 output "aws_profile_used" {
   value = var.aws_profile
 }
-
+output "asg_subnet_ids" {
+  description = "Subnets used for ASG (AZ-filtered for t3.micro support)"
+  value       = local.asg_subnet_ids
+}
 output "security_group_app_id" {
   value = aws_security_group.app.id
 }
-
 output "security_group_alb_id" {
   value = aws_security_group.alb.id
 }
-
 output "ssh_hint" {
-  value = var.key_name != "" ? "Find instance IPs in ASG/EC2 console, then: ssh -i <key.pem> ubuntu@<ip>" : "Set key_name to enable SSH"
+  value = var.key_name != "" ? "ssh -i <key.pem> ubuntu@<ip>" : "Set key_name to enable SSH"
 }
