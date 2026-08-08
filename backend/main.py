@@ -1,7 +1,7 @@
 """
 Pharmacy AI Assistant - FastAPI backend
 Medication identification + DEA regulations RAG with LangChain, optional Mem0.
-Speed path: small local Ollama model + streaming SSE.
+Linear RAG + LangGraph autonomous agent (Chroma tools only).
 """
 
 from __future__ import annotations
@@ -86,9 +86,9 @@ app = FastAPI(
     title="Pharmacy AI Assistant",
     description=(
         "Medication identification and DEA regulations assistant (Assessment III). "
-        "Educational use only. Supports JSON and SSE streaming chat."
+        "Educational use only. Supports JSON, SSE streaming, and LangGraph agent chat."
     ),
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -188,6 +188,21 @@ class ChatResponse(BaseModel):
     )
 
 
+class AgentChatResponse(BaseModel):
+    answer: str
+    sources: list[str] = []
+    mode: str = "agent"
+    intent: str = "general"
+    tool_used: str | None = None
+    steps: list[str] = []
+    agent: bool = True
+    disclaimer: str = (
+        "Educational/informational only. Not medical, legal, or pharmaceutical advice. "
+        "Verify with licensed professionals and current official DEA/FDA sources. "
+        "Agent answers are grounded only in Chroma-retrieved knowledge-base chunks."
+    )
+
+
 class HealthResponse(BaseModel):
     status: str
     documents_indexed: int
@@ -195,6 +210,7 @@ class HealthResponse(BaseModel):
     ollama_model: str | None = None
     rag_top_k: int | None = None
     startup_error: str | None = None
+    chroma: dict[str, Any] | None = None
 
 
 def _require_rag() -> PharmacyRAG:
@@ -214,6 +230,13 @@ def _require_rag() -> PharmacyRAG:
 
 def _health_payload() -> HealthResponse:
     status = "healthy" if rag is not None else "degraded"
+    chroma = None
+    if rag is not None:
+        try:
+            chroma = rag.index_status()
+        except Exception as e:
+            logger.debug("index_status failed: %s", e)
+            chroma = {"ready": False, "error": str(e)}
     return HealthResponse(
         status=status,
         documents_indexed=rag.document_count() if rag else 0,
@@ -221,6 +244,7 @@ def _health_payload() -> HealthResponse:
         ollama_model=os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
         rag_top_k=int(os.getenv("RAG_TOP_K", "3")),
         startup_error=_startup_error,
+        chroma=chroma,
     )
 
 
@@ -265,7 +289,7 @@ def chat(req: ChatRequest):
 
 @app.post("/api/chat/stream")
 def chat_stream(req: ChatRequest):
-    """SSE stream: data: {\"token\": \"...\"} then data: {\"done\": true, ...}."""
+    """SSE stream."""
     service = _require_rag()
     expanded = expand_query(req.message)
 
@@ -322,6 +346,44 @@ def dea_query(req: ChatRequest):
     return _run_chat(forced)
 
 
+@app.post("/api/agent/chat", response_model=AgentChatResponse)
+def agent_chat(req: ChatRequest):
+    """LangGraph agent: classify → Chroma tool → grounded answer."""
+    service = _require_rag()
+    try:
+        from agents.graph import run_pharmacy_agent
+
+        expanded = expand_query(req.message)
+        result = run_pharmacy_agent(service, expanded)
+        return AgentChatResponse(
+            answer=result.get("answer") or "",
+            sources=result.get("sources") or [],
+            mode="agent",
+            intent=result.get("intent") or "general",
+            tool_used=result.get("tool_used"),
+            steps=result.get("steps") or [],
+            agent=True,
+        )
+    except Exception as e:
+        logger.exception("Agent chat failed")
+        raise HTTPException(status_code=500, detail=f"Agent failed: {e!s}") from e
+
+
+@app.get("/api/agent/info")
+def agent_info():
+    from agents.tracing import configure_langsmith
+
+    return {
+        "name": "PharmacyAgent",
+        "framework": "langgraph (with sequential fallback)",
+        "flow": ["classify", "retrieve (Chroma tool)", "answer (grounded)"],
+        "tools": ["search_imprints", "search_dea", "search_general"],
+        "knowledge_source": "Chroma only (backend/source_data embeddings)",
+        "endpoint": "POST /api/agent/chat",
+        "langsmith": configure_langsmith(),
+    }
+
+
 ALLOWED_UPLOAD_SUFFIXES = {".txt", ".md", ".pdf"}
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(5 * 1024 * 1024)))
 
@@ -371,6 +433,13 @@ async def ingest(file: Annotated[UploadFile, File()]):
 @app.get("/api/stats")
 def stats():
     service = _require_rag()
+    from agents.tracing import configure_langsmith
+
+    chroma = None
+    try:
+        chroma = service.index_status()
+    except Exception:
+        chroma = None
     return {
         "documents": service.document_count(),
         "provider": os.getenv("LLM_PROVIDER", "ollama"),
@@ -378,6 +447,13 @@ def stats():
         "rag_top_k": int(os.getenv("RAG_TOP_K", "3")),
         "mem0_enabled": bool(os.getenv("MEM0_API_KEY")),
         "startup_error": _startup_error,
+        "chroma": chroma,
+        "agent": {
+            "endpoint": "/api/agent/chat",
+            "tools": ["search_imprints", "search_dea", "search_general"],
+            "langsmith": configure_langsmith(),
+        },
+        "note": "Answers are grounded only in Chroma-retrieved chunks from source_data",
     }
 
 
