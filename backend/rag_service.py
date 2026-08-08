@@ -1,9 +1,10 @@
-"""RAG service for Pharmacy AI Assistant - hybrid retrieval + LangChain + optional Mem0."""
+"""RAG service for Pharmacy AI Assistant — tuned for speed on local GPU Ollama."""
 
 from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,12 @@ DATA_PATH = Path(os.getenv("DATA_PATH", "source_data"))
 CHROMA_PATH = Path(os.getenv("CHROMA_PATH", "./chroma_db"))
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 150
+
+# Speed-oriented defaults (override via env)
+DEFAULT_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
+DEFAULT_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "350"))
+DEFAULT_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
+DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 
 
 class RAGServiceError(Exception):
@@ -45,6 +52,7 @@ class RAGServiceError(Exception):
 class PharmacyRAG:
     def __init__(self):
         self.provider = os.getenv("LLM_PROVIDER", "ollama").lower()
+        self.top_k = max(1, int(os.getenv("RAG_TOP_K", str(DEFAULT_TOP_K))))
         try:
             self.embeddings = self._build_embeddings()
             self.llm = self._build_llm()
@@ -63,6 +71,14 @@ class PharmacyRAG:
             chunk_overlap=CHUNK_OVERLAP,
             separators=["\n\n", "\n", ". ", " ", ""],
         )
+        logger.info(
+            "RAG config provider=%s model=%s top_k=%s num_predict=%s num_ctx=%s",
+            self.provider,
+            os.getenv("OLLAMA_MODEL", DEFAULT_MODEL),
+            self.top_k,
+            os.getenv("OLLAMA_NUM_PREDICT", DEFAULT_NUM_PREDICT),
+            os.getenv("OLLAMA_NUM_CTX", DEFAULT_NUM_CTX),
+        )
 
     def _build_embeddings(self):
         model = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
@@ -80,9 +96,20 @@ class PharmacyRAG:
                     http_status=503,
                 )
             return ChatOpenAI(model="gpt-4o-mini", temperature=0.1)
-        model = os.getenv("OLLAMA_MODEL", "llama3")
+
+        model = os.getenv("OLLAMA_MODEL", DEFAULT_MODEL)
         base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-        return ChatOllama(model=model, base_url=base, temperature=0.1)
+        num_predict = int(os.getenv("OLLAMA_NUM_PREDICT", str(DEFAULT_NUM_PREDICT)))
+        num_ctx = int(os.getenv("OLLAMA_NUM_CTX", str(DEFAULT_NUM_CTX)))
+        # keep_alive keeps the model loaded in VRAM between requests (GPU)
+        return ChatOllama(
+            model=model,
+            base_url=base,
+            temperature=0.1,
+            num_predict=num_predict,
+            num_ctx=num_ctx,
+            keep_alive="10m",
+        )
 
     def _init_mem0(self):
         key = os.getenv("MEM0_API_KEY")
@@ -270,9 +297,10 @@ class PharmacyRAG:
                 http_status=500,
             ) from e
 
-    def _retrieve(self, query: str, k: int = 6) -> list[Document]:
+    def _retrieve(self, query: str, k: int | None = None) -> list[Document]:
         if not self.vectorstore:
             return []
+        k = k if k is not None else self.top_k
         try:
             return self.vectorstore.similarity_search(query, k=k)
         except Exception as e:
@@ -283,6 +311,69 @@ class PharmacyRAG:
                 detail=str(e),
                 http_status=503,
             ) from e
+
+    def _build_context(
+        self,
+        question: str,
+        user_id: str = "default",
+    ) -> tuple[str, list[str]]:
+        docs = self._retrieve(question)
+        context = "\n\n".join(
+            f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}" for d in docs
+        )
+        sources = list({d.metadata.get("source", "unknown") for d in docs})
+        if not docs:
+            logger.info("No retrieved docs for query")
+
+        if self.mem0:
+            try:
+                memories = self.mem0.search(question, user_id=user_id)
+                if memories:
+                    context = context + "\nPrior relevant memories:\n" + str(memories)[:800]
+            except Exception as e:
+                logger.warning("Mem0 search failed (non-fatal): %s", e)
+
+        return context, sources
+
+    def _prompt_for_mode(self, mode: str):
+        if mode == "med_id":
+            return MED_ID_PROMPT
+        if mode == "dea":
+            return DEA_QUERY_PROMPT
+        return RAG_PROMPT
+
+    def _invoke_chain(self, mode: str, question: str, context: str) -> str:
+        if mode == "med_id":
+            chain = MED_ID_PROMPT | self.llm | StrOutputParser()
+            return chain.invoke({"query": question, "context": context})
+        if mode == "dea":
+            chain = DEA_QUERY_PROMPT | self.llm | StrOutputParser()
+            return chain.invoke({"query": question, "context": context})
+        chain = (
+            {"context": lambda _: context, "question": RunnablePassthrough()}
+            | RAG_PROMPT
+            | self.llm
+            | StrOutputParser()
+        )
+        return chain.invoke(question)
+
+    def _stream_chain(self, mode: str, question: str, context: str) -> Iterator[str]:
+        """Yield answer tokens as they are generated."""
+        if mode == "med_id":
+            chain = MED_ID_PROMPT | self.llm | StrOutputParser()
+            yield from chain.stream({"query": question, "context": context})
+            return
+        if mode == "dea":
+            chain = DEA_QUERY_PROMPT | self.llm | StrOutputParser()
+            yield from chain.stream({"query": question, "context": context})
+            return
+        chain = (
+            {"context": lambda _: context, "question": RunnablePassthrough()}
+            | RAG_PROMPT
+            | self.llm
+            | StrOutputParser()
+        )
+        yield from chain.stream(question)
 
     def query(
         self,
@@ -299,44 +390,12 @@ class PharmacyRAG:
             )
 
         try:
-            docs = self._retrieve(question)
+            context, sources = self._build_context(question, user_id=user_id)
         except RAGServiceError:
             raise
 
-        context = "\n\n".join(
-            f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}" for d in docs
-        )
-        sources = list({d.metadata.get("source", "unknown") for d in docs})
-
-        if not docs:
-            logger.info("No retrieved docs for query (mode=%s)", mode)
-
-        mem_context = ""
-        if self.mem0:
-            try:
-                memories = self.mem0.search(question, user_id=user_id)
-                if memories:
-                    mem_context = "\nPrior relevant memories:\n" + str(memories)[:1500]
-            except Exception as e:
-                logger.warning("Mem0 search failed (non-fatal): %s", e)
-
-        full_context = context + mem_context
-
         try:
-            if mode == "med_id":
-                chain = MED_ID_PROMPT | self.llm | StrOutputParser()
-                answer = chain.invoke({"query": question, "context": full_context})
-            elif mode == "dea":
-                chain = DEA_QUERY_PROMPT | self.llm | StrOutputParser()
-                answer = chain.invoke({"query": question, "context": full_context})
-            else:
-                chain = (
-                    {"context": lambda _: full_context, "question": RunnablePassthrough()}
-                    | RAG_PROMPT
-                    | self.llm
-                    | StrOutputParser()
-                )
-                answer = chain.invoke(question)
+            answer = self._invoke_chain(mode, question, context)
         except RAGServiceError:
             raise
         except Exception as e:
@@ -361,3 +420,50 @@ class PharmacyRAG:
                 logger.warning("Mem0 store failed (non-fatal): %s", e)
 
         return {"answer": answer, "sources": sources}
+
+    def query_stream(
+        self,
+        question: str,
+        user_id: str = "default",
+        session_id: str | None = None,
+        mode: str = "general",
+    ) -> Iterator[dict[str, Any]]:
+        """Yield dict events: {token}, then final {done, sources, answer}."""
+        if not question or not str(question).strip():
+            raise RAGServiceError(
+                "Empty question",
+                code="EMPTY_QUERY",
+                http_status=400,
+            )
+
+        context, sources = self._build_context(question, user_id=user_id)
+        pieces: list[str] = []
+        try:
+            for token in self._stream_chain(mode, question, context):
+                if not token:
+                    continue
+                pieces.append(token)
+                yield {"token": token}
+        except Exception as e:
+            logger.exception("LLM stream failed")
+            raise RAGServiceError(
+                "LLM generation failed (is Ollama running and the model pulled?)",
+                code="LLM_GENERATION_FAILED",
+                detail=str(e),
+                http_status=503,
+            ) from e
+
+        answer = "".join(pieces)
+        if self.mem0 and answer:
+            try:
+                self.mem0.add(
+                    [
+                        {"role": "user", "content": question},
+                        {"role": "assistant", "content": answer[:2000]},
+                    ],
+                    user_id=user_id,
+                )
+            except Exception as e:
+                logger.warning("Mem0 store failed (non-fatal): %s", e)
+
+        yield {"done": True, "answer": answer, "sources": sources, "mode": mode}
