@@ -2,17 +2,10 @@
 # =============================================================================
 # Pharmacy AI — AWS preflight (FAIL FAST before plan/apply/long bootstrap)
 #
-# Checks tools, profile, credentials, STS, region, and required API calls in
-# seconds — so you never wait on terraform apply / EC2 user_data only to find
-# out AWS auth was wrong.
-#
 # Usage:
-#   bash scripts/aws_preflight.sh           # full checks, exit 0/1
-#   bash scripts/aws_preflight.sh --quiet   # less banner noise
-#   source scripts/aws_preflight.sh && aws_preflight_run   # from other scripts
-#
-# On success exports (when sourced or via eval from --export):
-#   AWS_PROFILE, AWS_REGION, AWS_DEFAULT_REGION, TF_VAR_aws_profile, TF_VAR_aws_region
+#   bash scripts/aws_preflight.sh
+#   bash scripts/aws_preflight.sh --quiet
+#   source scripts/aws_preflight.sh && aws_preflight_run
 # =============================================================================
 set -euo pipefail
 
@@ -26,7 +19,7 @@ for arg in "$@"; do
     --quiet|-q) QUIET=1 ;;
     --export) DO_EXPORT=1 ;;
     --help|-h)
-      sed -n '2,20p' "$0"
+      sed -n '2,12p' "$0"
       exit 0
       ;;
   esac
@@ -71,7 +64,7 @@ aws_preflight_run() {
   if ! command -v aws >/dev/null 2>&1; then
     fail "AWS CLI not found"
     info "Install: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
-    info "WSL: curl package or pip install awscli — then: aws configure --profile default"
+    info "WSL: then run: aws configure --profile default"
     bump
   else
     ok "aws cli: $(aws --version 2>&1 | head -1)"
@@ -87,25 +80,26 @@ aws_preflight_run() {
     ok "terraform: $TFV"
   fi
 
-  # If core tools missing, stop before network calls
   if [[ "$ERRORS" -gt 0 ]]; then
     die
   fi
 
-  # --- 4. Profile discovery ---
+  # --- 4. Profile discovery (no fragile eval of free-form text) ---
   log "--- Profiles ---"
   python3 "$DETECT" --list || true
-  # shellcheck disable=SC2046
-  eval $(python3 "$DETECT" --export)
-  PROFILE="${AWS_PROFILE:-}"
+
+  PROFILE="$(python3 "$DETECT" 2>/dev/null || true)"
+  PROFILE="${PROFILE//$'\r'/}"
+  PROFILE="${PROFILE//$'\n'/}"
   REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
+
+  export AWS_PROFILE="${PROFILE}"
   export AWS_REGION="$REGION"
   export AWS_DEFAULT_REGION="$REGION"
   export TF_VAR_aws_profile="${PROFILE}"
   export TF_VAR_aws_region="$REGION"
 
   if [[ -n "$PROFILE" ]]; then
-    export AWS_PROFILE="$PROFILE"
     ok "using profile: $PROFILE"
   else
     warn "no named profile (brian/default) — using default credential chain (env keys / SSO)"
@@ -131,7 +125,7 @@ aws_preflight_run() {
     die
   fi
 
-  # --- 6. STS identity (the real auth test) ---
+  # --- 6. STS identity ---
   log "--- Credentials (STS) ---"
   STS_OUT=$(mktemp)
   STS_ERR=$(mktemp)
@@ -159,7 +153,7 @@ aws_preflight_run() {
   ok "identity: $ARN"
   rm -f "$STS_OUT" "$STS_ERR"
 
-  # --- 7. Region / EC2 API reachability ---
+  # --- 7. Region / EC2 / S3 ---
   log "--- Service reachability ---"
   set +e
   if [[ -n "$PROFILE" ]]; then
@@ -192,14 +186,9 @@ aws_preflight_run() {
     ok "S3 API reachable (list-buckets)"
   fi
 
-  set +e
-  if [[ -n "$PROFILE" ]]; then
-    aws iam get-user --profile "$PROFILE" >/dev/null 2>&1 || aws sts get-caller-identity --profile "$PROFILE" >/dev/null 2>&1
-  fi
-  set -e
   ok "IAM/STS path usable for instance profiles (full IAM checked at apply)"
 
-  # --- 8. Terraform dir + quick validate (no backend init upgrade yet) ---
+  # --- 8. Terraform files + seed ---
   log "--- Terraform files ---"
   if [[ ! -d "$ROOT/terraform" ]]; then
     fail "missing $ROOT/terraform"
@@ -227,7 +216,6 @@ aws_preflight_run() {
     ok "seed docs ready for S3 upload ($SEED_COUNT files)"
   fi
 
-  # Lightweight fmt check (non-fatal)
   if command -v terraform >/dev/null 2>&1; then
     if ! (cd "$ROOT/terraform" && terraform fmt -check -recursive >/dev/null 2>&1); then
       warn "terraform fmt would reformat files (non-blocking) — run: terraform fmt -recursive"
@@ -247,7 +235,6 @@ aws_preflight_run() {
   return 0
 }
 
-# Run if executed directly (not only sourced)
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   aws_preflight_run
   if [[ "$DO_EXPORT" -eq 1 ]]; then

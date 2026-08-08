@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Detect a local AWS shared profile for Pharmacy AI / Sonoran Forge deploys.
+"""Detect a local AWS shared profile for Pharmacy AI deploys.
 
 Search order:
   1. AWS_PROFILE or AWS_DEFAULT_PROFILE environment variables (if set)
@@ -8,8 +8,8 @@ Search order:
   4. Empty string → caller should use the default AWS credential chain
 
 Usage:
-  eval $(python3 scripts/detect_aws_profile.py --export)
   PROFILE=$(python3 scripts/detect_aws_profile.py)
+  eval "$(python3 scripts/detect_aws_profile.py --export)"   # quoted; export lines only
   terraform plan -var="aws_profile=$PROFILE"
 """
 from __future__ import annotations
@@ -56,7 +56,6 @@ def _read_profiles() -> list[str]:
         except configparser.Error:
             continue
         for section in parser.sections():
-            # config file uses "profile foo"; credentials uses "foo" or "default"
             if section.lower().startswith("profile "):
                 add(section[8:].strip())
             else:
@@ -87,7 +86,7 @@ def main() -> int:
     parser.add_argument(
         "--export",
         action="store_true",
-        help="Print shell exports for AWS_PROFILE and TF_VAR_aws_profile",
+        help="Print shell exports only (AWS_PROFILE, TF_VAR_aws_profile) — no echo lines",
     )
     parser.add_argument(
         "--list",
@@ -127,13 +126,17 @@ def main() -> int:
         return 0
 
     if args.export:
-        # Safe for eval in bash/zsh
+        # ONLY assignment lines on stdout (safe for: eval "$(... --export)")
+        # Human messages go to stderr — never into eval/export
         print(f'export AWS_PROFILE="{chosen}"')
         print(f'export TF_VAR_aws_profile="{chosen}"')
         if chosen:
-            print(f'echo "Using AWS profile: {chosen}" >&2')
+            print(f"Using AWS profile: {chosen}", file=sys.stderr)
         else:
-            print('echo "No named AWS profile found; using default credential chain" >&2')
+            print(
+                "No named AWS profile found; using default credential chain",
+                file=sys.stderr,
+            )
         return 0
 
     # Plain profile name only (may be empty)
