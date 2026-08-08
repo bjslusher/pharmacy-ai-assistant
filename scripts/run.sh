@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Pharmacy AI Assistant orchestrator
-# --yes exports FULL_YES so GPU selection uses the detected device
-# stop ends with post-flight Assessment III rubric audit
+# Order matters: Ollama up → pull models → backend (Chroma needs nomic-embed-text)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,6 +18,7 @@ OLLAMA_EMBED_MODEL="${OLLAMA_EMBED_MODEL:-nomic-embed-text}"
 FRONTEND_URL="${FRONTEND_URL:-http://localhost:3000}"
 BACKEND_URL="${BACKEND_URL:-http://localhost:8000}"
 HEALTH_URL="${HEALTH_URL:-http://localhost:8000/api/health}"
+OLLAMA_URL="${OLLAMA_URL:-http://localhost:11434}"
 FULL_YES=0
 ACTIVE_ACCEL="cpu"
 
@@ -54,20 +54,6 @@ configure_compose() {
   fi
 }
 
-compose_up_with_fallback() {
-  configure_compose || { ui_fail "Docker Compose not available"; exit 1; }
-  ui_section "Compose build & start ($ACTIVE_ACCEL)"
-  if "${COMPOSE[@]}" up --build -d; then ui_ok "docker compose up ($ACTIVE_ACCEL)"; return 0; fi
-  if [[ "$ACTIVE_ACCEL" == "gpu" ]]; then
-    ui_warn "GPU compose failed — falling back to CPU"
-    "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
-    COMPOSE=("${COMPOSE_BIN[@]}" -f docker-compose.yml); ACTIVE_ACCEL="cpu"
-    printf 'cpu\n' > "$ROOT/.gpu_preference"
-    if "${COMPOSE[@]}" up --build -d; then ui_ok "docker compose up (CPU fallback)"; return 0; fi
-  fi
-  ui_fail "docker compose up failed"; return 1
-}
-
 ensure_env() {
   if [[ ! -f backend/.env ]]; then
     if [[ -f backend/.env.example ]]; then cp backend/.env.example backend/.env; ui_ok "backend/.env from example"
@@ -80,6 +66,19 @@ wait_http() {
   ui_wait "$name  $url"
   for ((i = 1; i <= tries; i++)); do curl -sf "$url" >/dev/null 2>&1 && { ui_ok "$name healthy"; return 0; }; sleep 2; done
   ui_fail "$name not healthy"; return 1
+}
+
+wait_ollama() {
+  ui_wait "Ollama API  $OLLAMA_URL"
+  for ((i = 1; i <= 45; i++)); do
+    if curl -sf "$OLLAMA_URL/api/tags" >/dev/null 2>&1; then
+      ui_ok "Ollama API reachable"
+      return 0
+    fi
+    sleep 2
+  done
+  ui_fail "Ollama API not reachable"
+  return 1
 }
 
 container_running() { "${COMPOSE[@]}" ps --status running 2>/dev/null | grep -qi "$1"; }
@@ -95,11 +94,26 @@ report_docker_components_up() {
 }
 
 pull_models() {
-  ui_section "Ollama models"
-  if container_running ollama; then
-    "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_MODEL" && ui_ok "$OLLAMA_MODEL" || ui_warn "pull failed"
-    "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_EMBED_MODEL" && ui_ok "$OLLAMA_EMBED_MODEL" || ui_warn "embed pull failed"
+  ui_section "Ollama models (required before Chroma index)"
+  if ! container_running ollama; then
+    ui_fail "ollama container not running — cannot pull models"
+    return 1
   fi
+  ui_wait "pull $OLLAMA_EMBED_MODEL (embeddings for Chroma)"
+  if "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_EMBED_MODEL"; then
+    ui_ok "$OLLAMA_EMBED_MODEL ready"
+  else
+    ui_fail "failed to pull $OLLAMA_EMBED_MODEL — RAG index cannot build"
+    return 1
+  fi
+  ui_wait "pull $OLLAMA_MODEL (chat)"
+  if "${COMPOSE[@]}" exec -T ollama ollama pull "$OLLAMA_MODEL"; then
+    ui_ok "$OLLAMA_MODEL ready"
+  else
+    ui_warn "chat model pull failed — chat may fail until fixed"
+  fi
+  # List models for visual confirmation
+  "${COMPOSE[@]}" exec -T ollama ollama list 2>/dev/null | sed 's/^/    /' || true
 }
 
 require_compose() { [[ ${#COMPOSE_BIN[@]} -gt 0 ]] || { ui_fail "Compose missing"; exit 1; }; ui_ok "Docker Compose available"; }
@@ -108,14 +122,87 @@ aws_frontend_url() { [[ -d terraform ]] && command -v terraform >/dev/null 2>&1 
 aws_health_url() { [[ -d terraform ]] && command -v terraform >/dev/null 2>&1 && (cd terraform && terraform output -raw health_url 2>/dev/null) || true; }
 print_access() { ui_access_box "$FRONTEND_URL" "$BACKEND_URL/docs" "$(aws_frontend_url)" "$(aws_health_url)"; }
 
+# Staged start avoids backend indexing before nomic-embed-text exists
+compose_up_staged() {
+  configure_compose || { ui_fail "Docker Compose not available"; exit 1; }
+
+  ui_section "Stage A — Ollama only"
+  if ! "${COMPOSE[@]}" up -d ollama; then
+    ui_fail "failed to start ollama"
+    return 1
+  fi
+  ui_ok "ollama container started"
+  wait_ollama || return 1
+
+  pull_models || return 1
+
+  ui_section "Stage B — backend + frontend (embeddings ready)"
+  if "${COMPOSE[@]}" up --build -d backend frontend; then
+    ui_ok "backend + frontend started"
+  else
+    if [[ "$ACTIVE_ACCEL" == "gpu" ]]; then
+      ui_warn "GPU compose failed — falling back to CPU"
+      "${COMPOSE[@]}" down --remove-orphans >/dev/null 2>&1 || true
+      COMPOSE=("${COMPOSE_BIN[@]}" -f docker-compose.yml); ACTIVE_ACCEL="cpu"
+      printf 'cpu\n' > "$ROOT/.gpu_preference"
+      "${COMPOSE[@]}" up -d ollama
+      wait_ollama || return 1
+      pull_models || return 1
+      "${COMPOSE[@]}" up --build -d backend frontend || { ui_fail "compose up failed"; return 1; }
+    else
+      ui_fail "compose up backend/frontend failed"
+      return 1
+    fi
+  fi
+
+  # Give backend a moment; if still 503, restart once after models are warm
+  sleep 5
+  if ! curl -sf "$HEALTH_URL" >/dev/null 2>&1; then
+    ui_warn "backend not healthy yet — restarting backend once after model warm-up"
+    "${COMPOSE[@]}" restart backend >/dev/null 2>&1 || true
+    sleep 4
+  fi
+  return 0
+}
+
+wait_rag_ready() {
+  ui_section "Wait for RAG / Chroma"
+  local tries=40
+  for ((i = 1; i <= tries; i++)); do
+    body=$(curl -sf "$HEALTH_URL" 2>/dev/null || true)
+    if [[ -n "$body" ]]; then
+      status=$(echo "$body" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("status",""))' 2>/dev/null || true)
+      docs=$(echo "$body" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d.get("documents_indexed",0))' 2>/dev/null || true)
+      if [[ "$status" == "healthy" ]]; then
+        ui_ok "RAG healthy — documents_indexed=${docs:-?}"
+        # Visual Chroma confirmation via stats
+        curl -sf "$BACKEND_URL/api/stats" 2>/dev/null | python3 -c '
+import sys,json
+try:
+  d=json.load(sys.stdin)
+  c=d.get("chroma") or {}
+  print(f"  [CHROMA] ready={c.get("ready")} docs={d.get("documents")} collection={c.get("collection")}")
+except Exception:
+  pass
+' || true
+        return 0
+      fi
+    fi
+    sleep 3
+  done
+  ui_fail "RAG still not healthy — check: docker compose logs backend | tail -50"
+  ui_warn "Common fix: docker compose restart backend  (after ollama list shows nomic-embed-text)"
+  return 1
+}
+
 start_local_stack() {
   ui_banner "STARTUP - Local Docker"
   ui_section "Preflight"; run_preflight local; ui_ok "preflight passed"
   require_compose; ensure_env
-  compose_up_with_fallback || exit 1
-  sleep 4; pull_models || true
-  wait_http "$HEALTH_URL" "backend" 45 || true
+  compose_up_staged || exit 1
+  wait_http "$HEALTH_URL" "backend" 30 || true
   wait_http "$FRONTEND_URL" "frontend" 20 || true
+  wait_rag_ready || true
   report_docker_components_up || true
 }
 
@@ -124,14 +211,17 @@ cmd_start() {
   ui_summary_box "STARTUP" "${C_OK}✔${C_RST} Docker ($ACTIVE_ACCEL)"
   print_access
   echo "Stop: bash scripts/run.sh stop"
+  echo "If UI shows 503: docker compose restart backend && curl -s $HEALTH_URL"
   echo "GPU re-ask: FORCE_GPU_PROMPT=1 bash scripts/run.sh start"
 }
 
 cmd_full() {
   ui_banner "STARTUP - Full system"
   ui_section "Stage 1/4 Preflight"; run_preflight all; ui_ok "preflight passed"
-  ui_section "Stage 2/4 Docker"; require_compose; ensure_env; compose_up_with_fallback || exit 1
-  sleep 4; pull_models || true; wait_http "$HEALTH_URL" "backend" 45 || true; report_docker_components_up || true
+  ui_section "Stage 2/4 Docker"; require_compose; ensure_env; compose_up_staged || exit 1
+  wait_http "$HEALTH_URL" "backend" 30 || true
+  wait_rag_ready || true
+  report_docker_components_up || true
   ui_section "Stage 3/4 Terraform plan"; bash "$ROOT/scripts/aws_up.sh" plan
   ui_section "Stage 4/4 Terraform apply"
   if [[ "$FULL_YES" -eq 1 || "${RUN_FULL_YES:-}" == "1" ]]; then bash "$ROOT/scripts/aws_up.sh" apply
@@ -154,8 +244,6 @@ cmd_stop() {
     if [[ "$FULL_YES" -eq 1 || "${RUN_FULL_YES:-}" == "1" ]]; then bash "$ROOT/scripts/aws_up.sh" destroy
     else echo "Type yes to destroy AWS:"; read -r ans || true; [[ "${ans}" == "yes" ]] && bash "$ROOT/scripts/aws_up.sh" destroy || ui_skip "AWS left"; fi
   else ui_skip "no terraform state"; fi
-
-  # Always audit deliverables after teardown
   run_postflight
 }
 
@@ -164,6 +252,7 @@ cmd_status() {
   [[ ${#COMPOSE[@]} -gt 0 ]] && "${COMPOSE[@]}" ps || true
   [[ -f .gpu_name ]] && ui_ok "gpu=$(tr -d '\n' < .gpu_name)"
   [[ -f .gpu_preference ]] && ui_ok "preference=$(tr -d '[:space:]' < .gpu_preference)"
+  curl -sf "$HEALTH_URL" 2>/dev/null | python3 -m json.tool 2>/dev/null || ui_warn "health not reachable"
   print_access
 }
 
