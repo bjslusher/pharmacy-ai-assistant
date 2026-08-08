@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react'
 import axios from 'axios'
+import SonoranForgeLogo from './SonoranForgeLogo'
 
 const API = import.meta.env.VITE_API_URL || '/api'
 const QUICK = [
@@ -52,10 +53,16 @@ export default function App() {
   return (
     <>
       <header className="header">
-        <h1>
-          Pharmacy AI Assistant
-          <span className="badge">Med ID + DEA</span>
-        </h1>
+        <div className="brand">
+          <SonoranForgeLogo size={40} className="brand-logo" />
+          <div className="brand-text">
+            <h1>
+              Pharmacy AI Assistant
+              <span className="badge">Med ID + DEA</span>
+            </h1>
+            <span className="brand-sub">Sonoran Forge</span>
+          </div>
+        </div>
         <span className="meta">Assessment III · RAG · Mem0</span>
       </header>
       <div className="layout">

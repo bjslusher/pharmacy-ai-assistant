@@ -1,4 +1,4 @@
-/* Sonoran Forge–inspired palette (pharmacy UI only; not studio branding docs) */
+/* Sonoran Forge–inspired palette (pharmacy UI) */
 :root {
   --bg: #0f0e0d;
   --surface: #1c1814;
@@ -31,21 +31,50 @@ body {
 .header {
   background: linear-gradient(135deg, #241c16 0%, var(--surface) 50%, #1a120e 100%);
   color: var(--text);
-  padding: 1rem 1.5rem;
+  padding: 0.85rem 1.5rem;
   display: flex;
   justify-content: space-between;
   align-items: center;
   border-bottom: 1px solid var(--border);
+  gap: 1rem;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+}
+
+.brand-logo {
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 6px rgba(222, 134, 91, 0.35));
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
 }
 
 .header h1 {
-  font-size: 1.15rem;
+  font-size: 1.1rem;
   font-weight: 600;
   letter-spacing: 0.02em;
   display: flex;
   align-items: center;
   gap: 0.5rem;
   flex-wrap: wrap;
+  margin: 0;
+}
+
+.brand-sub {
+  font-size: 0.72rem;
+  color: var(--gold);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-weight: 600;
 }
 
 .header .badge {
@@ -61,12 +90,13 @@ body {
 .header .meta {
   font-size: 0.85rem;
   color: var(--muted);
+  flex-shrink: 0;
 }
 
 .layout {
   display: grid;
   grid-template-columns: 1fr 320px;
-  height: calc(100vh - 62px);
+  height: calc(100vh - 68px);
   background: var(--bg);
 }
 
@@ -75,6 +105,9 @@ body {
     grid-template-columns: 1fr;
   }
   .side {
+    display: none;
+  }
+  .header .meta {
     display: none;
   }
 }
