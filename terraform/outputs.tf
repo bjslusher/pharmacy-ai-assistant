@@ -1,5 +1,5 @@
-# Primary outputs are declared in main.tf.
-# This file keeps a single summary map for quick terraform output -json use.
+# Primary outputs are also declared in main.tf.
+# This summary map is handy for: terraform output -json summary
 
 output "summary" {
   description = "Demo endpoints and core resource ids"
@@ -8,7 +8,7 @@ output "summary" {
     frontend    = "http://${aws_lb.app.dns_name}"
     health      = "http://${aws_lb.app.dns_name}/api/health"
     asg_name    = aws_autoscaling_group.app.name
-    data_bucket = aws_s3_bucket.data.id
-    logs_bucket = aws_s3_bucket.logs.id
+    data_bucket = module.data_bucket.id
+    logs_bucket = module.logs_bucket.id
   }
 }
