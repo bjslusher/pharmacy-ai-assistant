@@ -228,7 +228,6 @@ resource "aws_security_group" "app" {
     security_groups = [aws_security_group.alb.id]
   }
 
-  # Direct access for demo/debug (optional; ALB is the preferred path)
   ingress {
     description = "SSH"
     from_port   = 22
@@ -321,6 +320,9 @@ resource "aws_autoscaling_group" "app" {
   desired_capacity          = var.asg_desired_capacity
   health_check_type         = "ELB"
   health_check_grace_period = var.asg_health_check_grace_seconds
+  # Faster demo teardown: do not block destroy on full instance termination wait
+  force_delete              = true
+  wait_for_capacity_timeout = "10m"
   target_group_arns = [
     aws_lb_target_group.frontend.arn,
     aws_lb_target_group.backend.arn,
@@ -348,7 +350,6 @@ resource "aws_autoscaling_group" "app" {
   }
 }
 
-# Optional CPU scale-out policy (demo - shows ASG can react to load)
 resource "aws_autoscaling_policy" "cpu_target" {
   name                   = "${local.name_prefix}-cpu-target"
   autoscaling_group_name = aws_autoscaling_group.app.name
