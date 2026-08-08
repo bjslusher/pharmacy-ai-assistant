@@ -52,20 +52,25 @@ export default function App() {
   return (
     <>
       <header className="header">
-        <h1>💊 Pharmacy AI Assistant <span style={{fontSize:'0.7rem',background:'rgba(255,255,255,0.2)',padding:'2px 8px',borderRadius:99}}>Med ID + DEA</span></h1>
-        <span style={{fontSize:'0.85rem',opacity:0.9}}>Assessment III · RAG · Mem0</span>
+        <h1>
+          Pharmacy AI Assistant
+          <span className="badge">Med ID + DEA</span>
+        </h1>
+        <span className="meta">Assessment III · RAG · Mem0</span>
       </header>
       <div className="layout">
         <section className="chat">
           <div className="msgs">
-            {msgs.map((m,i) => (
+            {msgs.map((m, i) => (
               <div key={i} className={`msg ${m.role}`}>
-                <div style={{fontSize:'0.7rem',fontWeight:600,opacity:0.7,marginBottom:4}}>{m.role==='user'?'You':'Assistant'}</div>
+                <div className="role-label">{m.role === 'user' ? 'You' : 'Assistant'}</div>
                 {m.text}
                 {m.sources?.length > 0 && (
                   <div className="src">
                     <strong>Sources:</strong>
-                    {m.sources.map((s,j) => <div key={j}>{typeof s==='string'?s:(s.source||s.filename||JSON.stringify(s))}</div>)}
+                    {m.sources.map((s, j) => (
+                      <div key={j}>{typeof s === 'string' ? s : (s.source || s.filename || JSON.stringify(s))}</div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -74,25 +79,37 @@ export default function App() {
             <div ref={end} />
           </div>
           <div className="input-row">
-            <textarea value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}}} placeholder="Ask about med ID or DEA regs…" disabled={busy} rows={1} />
-            <button onClick={()=>send()} disabled={busy||!input.trim()}>Send</button>
+            <textarea
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
+              placeholder="Ask about med ID or DEA regs…"
+              disabled={busy}
+              rows={1}
+            />
+            <button onClick={() => send()} disabled={busy || !input.trim()}>Send</button>
           </div>
         </section>
         <aside className="side">
           <div className="card">
-            <h3>🔍 Medication ID</h3>
-            <input placeholder="Imprint e.g. M367" value={imprint} onChange={e=>setImprint(e.target.value)} />
-            <input placeholder="NDC optional" value={ndc} onChange={e=>setNdc(e.target.value)} />
-            <input placeholder="Drug name optional" value={name} onChange={e=>setName(e.target.value)} />
+            <h3>Medication ID</h3>
+            <input placeholder="Imprint e.g. M367" value={imprint} onChange={e => setImprint(e.target.value)} />
+            <input placeholder="NDC optional" value={ndc} onChange={e => setNdc(e.target.value)} />
+            <input placeholder="Drug name optional" value={name} onChange={e => setName(e.target.value)} />
             <button onClick={identify} disabled={busy}>Identify</button>
           </div>
           <div className="card">
-            <h3>⚡ Quick Questions</h3>
-            {QUICK.map((q,i)=><button key={i} className="quick" onClick={()=>send(q)} disabled={busy}>{q}</button>)}
+            <h3>Quick Questions</h3>
+            {QUICK.map((q, i) => (
+              <button key={i} className="quick" onClick={() => send(q)} disabled={busy}>{q}</button>
+            ))}
           </div>
           <div className="card">
-            <h3>⚠️ Disclaimer</h3>
-            <div className="disclaimer">Educational tool only. Grounded in sample DEA/med docs. Not professional advice. Verify with official DEA Pharmacist's Manual, CFR, and licensed pharmacists.</div>
+            <h3>Disclaimer</h3>
+            <div className="disclaimer">
+              Educational tool only. Grounded in sample DEA/med docs. Not professional advice.
+              Verify with official DEA Pharmacist's Manual, CFR, and licensed pharmacists.
+            </div>
           </div>
         </aside>
       </div>
