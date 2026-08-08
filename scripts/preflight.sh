@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Pharmacy AI Assistant — unified preflight (FAIL FAST)
-#
 # Modes: local | aws | all
-# Also writes .gpu_status for run.sh (gpu|cpu) after local checks.
+# GPU: scripts/gpu_select.sh prompts when NVIDIA is found; saves preference
 # =============================================================================
 set -euo pipefail
 
@@ -12,7 +11,7 @@ cd "$ROOT"
 
 MODE="${1:-local}"
 ERRORS=0
-GPU_MODE="cpu"
+GPU_PREF="cpu"
 
 ok()   { echo "  [OK]  $*"; }
 fail() { echo "  [FAIL] $*" >&2; ERRORS=$((ERRORS + 1)); }
@@ -28,58 +27,27 @@ die_if_errors() {
   fi
   echo "=== PREFLIGHT PASSED ($MODE) ==="
   if [[ "$MODE" == "local" || "$MODE" == "docker" || "$MODE" == "stack" || "$MODE" == "all" || "$MODE" == "full" ]]; then
-    echo "=== GPU MODE: $GPU_MODE ==="
+    local status="cpu"
+    [[ -f "$ROOT/.gpu_status" ]] && status="$(tr -d '[:space:]' < "$ROOT/.gpu_status")"
+    [[ -f "$ROOT/.gpu_preference" ]] && GPU_PREF="$(tr -d '[:space:]' < "$ROOT/.gpu_preference")"
+    echo "=== GPU CAPABILITY: $status | PREFERENCE: $GPU_PREF ==="
   fi
 }
 
-# Detect host NVIDIA + Docker GPU runtime. Sets GPU_MODE=gpu|cpu and .gpu_status
 check_gpu() {
   echo "--- GPU / acceleration ---"
-  local host_gpu=0 docker_gpu=0
-
-  if command -v nvidia-smi >/dev/null 2>&1; then
-    if nvidia-smi >/dev/null 2>&1; then
-      host_gpu=1
-      ok "nvidia-smi: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1)"
-    else
-      warn "nvidia-smi present but failed — driver issue?"
+  if [[ -f "$ROOT/scripts/gpu_select.sh" ]]; then
+    # Interactive prompt lives here (TTY). Env: GPU_PREFERENCE / FORCE_GPU_PROMPT
+    bash "$ROOT/scripts/gpu_select.sh"
+    if [[ -f "$ROOT/.gpu_preference" ]]; then
+      GPU_PREF="$(tr -d '[:space:]' < "$ROOT/.gpu_preference")"
     fi
   else
-    warn "nvidia-smi not found on host — Ollama will run on CPU (slower)"
+    warn "scripts/gpu_select.sh missing — defaulting to cpu"
+    printf 'cpu\n' > "$ROOT/.gpu_status"
+    printf 'cpu\n' > "$ROOT/.gpu_preference"
+    GPU_PREF=cpu
   fi
-
-  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    if docker info 2>/dev/null | grep -qi 'Runtimes:.*nvidia'; then
-      docker_gpu=1
-      ok "Docker NVIDIA runtime registered"
-    elif docker run --rm --gpus all nvidia/cuda:12.0.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
-      docker_gpu=1
-      ok "Docker --gpus all works"
-    else
-      # cheaper probe without pulling cuda image if possible
-      if docker info 2>/dev/null | grep -qi nvidia; then
-        docker_gpu=1
-        ok "Docker reports NVIDIA capability"
-      else
-        warn "Docker cannot use GPU (enable GPU in Docker Desktop / install nvidia-container-toolkit)"
-      fi
-    fi
-  fi
-
-  if [[ "$host_gpu" -eq 1 && "$docker_gpu" -eq 1 ]]; then
-    GPU_MODE="gpu"
-    ok "GPU path enabled — Ollama will use NVIDIA (compose gpus: all)"
-  elif [[ "$host_gpu" -eq 1 && "$docker_gpu" -eq 0 ]]; then
-    GPU_MODE="cpu"
-    warn "GPU on host but not available to Docker — falling back to CPU Ollama"
-    info "Fix: Docker Desktop → Settings → Resources → enable GPU; WSL2 + nvidia-container-toolkit"
-  else
-    GPU_MODE="cpu"
-    warn "No usable GPU for containers — CPU fallback (still works, slower generation)"
-  fi
-
-  printf '%s\n' "$GPU_MODE" > "$ROOT/.gpu_status"
-  ok "wrote .gpu_status=$GPU_MODE"
 }
 
 preflight_local() {
@@ -123,7 +91,7 @@ preflight_local() {
   check_gpu
 
   [[ -f "$ROOT/docker-compose.yml" ]] && ok "docker-compose.yml" || fail "missing docker-compose.yml"
-  [[ -f "$ROOT/docker-compose.cpu.yml" ]] && ok "docker-compose.cpu.yml (CPU fallback)" || warn "missing docker-compose.cpu.yml"
+  [[ -f "$ROOT/docker-compose.gpu.yml" ]] && ok "docker-compose.gpu.yml (GPU overlay)" || warn "missing docker-compose.gpu.yml"
   [[ -f "$ROOT/backend/Dockerfile" ]] && ok "backend/Dockerfile" || fail "missing backend/Dockerfile"
   [[ -f "$ROOT/frontend/Dockerfile" ]] && ok "frontend/Dockerfile" || fail "missing frontend/Dockerfile"
   [[ -f "$ROOT/backend/main.py" ]] && ok "backend/main.py" || fail "missing backend/main.py"
@@ -233,7 +201,7 @@ case "$MODE" in
     die_if_errors
     ;;
   -h|--help|help)
-    sed -n '2,16p' "$0"
+    sed -n '2,12p' "$0"
     exit 0
     ;;
   *)
