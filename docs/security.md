@@ -1,35 +1,49 @@
 # Security & sensitive data
 
-## What must never appear in logs or screenshots
+Full policy for demos, screenshots, and repo hygiene. Also summarized in the root [README](../README.md#security-risks-and-mitigations).
 
-| Item | Policy |
-|------|--------|
-| `AWS_SECRET_ACCESS_KEY` | Never print |
-| `AWS_SESSION_TOKEN` | Never print |
-| Private keys (`.pem`) | Never print / gitignored |
-| `OPENAI_API_KEY`, `MEM0_API_KEY`, `LANGCHAIN_API_KEY` | Env only; never log values |
-| Full AWS account ID | Masked in preflight (`****4728`) |
-| Full IAM ARN | Masked (`…user/B***`) |
-| Access key ID (`AKIA…`) | Partial mask only |
+## Risks and mitigations
 
-## Where masking is applied
+| Risk | Severity | Mitigation |
+|------|----------|------------|
+| Secret access key or session token printed in terminal | Critical | **Never printed.** Preflight only reports that the env var is present. |
+| Access key ID (`AKIA…` / `ASIA…`) fully logged | High | Partial mask (`AKIA************XXXX`). Error text is scrubbed for key patterns. |
+| Full 12-digit AWS account ID in screenshots | Medium | Default mask: `****` + last 4 digits. |
+| Full IAM ARN with username | Medium | Masked account + shortened principal (`user/B***`). |
+| `.env` / API keys committed to git | Critical | Gitignored: `.env`, `backend/.env`, `*.pem`, `*.tfstate`, real `*.tfvars`. |
+| Secrets hard-coded in GitHub Actions YAML | Critical | Use repository Secrets (`${{ secrets.* }}`) only. |
+| Terraform state committed | High | `*.tfstate*` gitignored; destroy via `run.sh stop`. |
+| Third-party keys (OpenAI, Mem0, LangSmith) in logs | High | Optional env only; application code does not log values. |
 
-- `scripts/aws_preflight.sh` — STS account + ARN + env key presence
-- `scripts/redact.sh` — shared helpers for other scripts
-
-Opt-in full identity (private machine only):
+## Console masking (default on)
 
 ```bash
-export AWS_PREFLIGHT_SHOW_IDENTITY=1
+bash scripts/aws_preflight.sh
+# [OK] account: ****4728
+# [OK] identity: arn:aws:iam::****4728:user/B***
 ```
 
-## Repo hygiene
+Full identity (private machine only):
 
-- `.env` and `backend/.env` are gitignored
-- `*.tfstate`, `*.tfvars` (except examples), `*.pem` gitignored
-- GitHub Actions should use repository **Secrets**, not hard-coded keys
-- Terraform outputs expose public URLs/bucket names (expected); not IAM user ARNs
+```bash
+AWS_PREFLIGHT_SHOW_IDENTITY=1 bash scripts/aws_preflight.sh
+# or: bash scripts/aws_preflight.sh --show-identity
+```
 
-## If you already leaked an account ID in a screenshot
+Helpers: [`scripts/redact.sh`](../scripts/redact.sh) · wired from [`scripts/aws_preflight.sh`](../scripts/aws_preflight.sh).
 
-Account IDs are not secret keys, but avoid publishing them. Rotate access keys if a **secret** key was ever pasted into chat, slides, or a public gist.
+## Repo checklist
+
+- [ ] No real keys in commits (`git log -p` / secret scanners)
+- [ ] Local `.env` never copied into slides or Discord
+- [ ] Prefer masked preflight when recording demos
+- [ ] `bash scripts/run.sh stop --yes` after AWS demos (cost + residual resources)
+
+## If something already leaked
+
+| Leaked | Action |
+|--------|--------|
+| Secret access key | Deactivate/delete key in IAM immediately; create a new one |
+| Session token | Wait for expiry or revoke session; re-login |
+| Account ID only | Low urgency; avoid further public posts of the same screenshot |
+| Third-party API key | Rotate at the provider |
