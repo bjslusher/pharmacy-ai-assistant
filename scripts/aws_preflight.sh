@@ -2,6 +2,9 @@
 # =============================================================================
 # Pharmacy AI — AWS preflight (FAIL FAST before plan/apply/long bootstrap)
 #
+# Sensitive fields (account ID, IAM ARN) are masked in console output by default.
+# Set AWS_PREFLIGHT_SHOW_IDENTITY=1 to print full values for local debugging only.
+#
 # Usage:
 #   bash scripts/aws_preflight.sh
 #   bash scripts/aws_preflight.sh --quiet
@@ -13,13 +16,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DETECT="$ROOT/scripts/detect_aws_profile.py"
 QUIET=0
 DO_EXPORT=0
+# Never print secrets. Mask account/ARN unless explicitly opted in.
+SHOW_IDENTITY="${AWS_PREFLIGHT_SHOW_IDENTITY:-0}"
 
 for arg in "$@"; do
   case "$arg" in
     --quiet|-q) QUIET=1 ;;
     --export) DO_EXPORT=1 ;;
+    --show-identity) SHOW_IDENTITY=1 ;;
     --help|-h)
-      sed -n '2,12p' "$0"
+      sed -n '2,14p' "$0"
       exit 0
       ;;
   esac
@@ -41,9 +47,79 @@ die()  {
 ERRORS=0
 bump() { ERRORS=$((ERRORS + 1)); }
 
+# --- Redaction helpers (safe for screenshots / demo recordings) ---
+mask_account() {
+  # 12-digit account → ****XXXX (last 4)
+  local a="${1:-}"
+  if [[ -z "$a" ]]; then
+    echo "(unknown)"
+    return
+  fi
+  if [[ "$SHOW_IDENTITY" == "1" ]]; then
+    echo "$a"
+    return
+  fi
+  local n=${#a}
+  if [[ "$n" -le 4 ]]; then
+    echo "****"
+    return
+  fi
+  echo "****${a: -4}"
+}
+
+mask_arn() {
+  # arn:aws:iam::123456789012:user/Brian → arn:aws:iam::****9012:user/B***
+  local arn="${1:-}"
+  if [[ -z "$arn" ]]; then
+    echo "(unknown)"
+    return
+  fi
+  if [[ "$SHOW_IDENTITY" == "1" ]]; then
+    echo "$arn"
+    return
+  fi
+  # Split and mask account + shorten principal name
+  python3 - "$arn" <<'PY'
+import re, sys
+arn = sys.argv[1]
+m = re.match(r"^(arn:aws:iam::)(\d{12})(:.+)$", arn)
+if not m:
+    # generic: keep service prefix, mask middle
+    if len(arn) > 16:
+        print(arn[:12] + "…" + arn[-6:])
+    else:
+        print("***")
+    raise SystemExit
+prefix, acct, rest = m.group(1), m.group(2), m.group(3)
+masked_acct = "****" + acct[-4:]
+# mask username / role name but keep type (user/role)
+m2 = re.match(r"^:(user|role|assumed-role)/(.+)$", rest)
+if m2:
+    kind, name = m2.group(1), m2.group(2)
+    short = (name[0] + "***") if name else "***"
+    print(f"{prefix}{masked_acct}:{kind}/{short}")
+else:
+    print(f"{prefix}{masked_acct}:***")
+PY
+}
+
+mask_access_key_id() {
+  # AKIA... → AKIA************XXXX (never print secret keys at all)
+  local k="${1:-}"
+  [[ -z "$k" ]] && { echo "(none)"; return; }
+  if [[ "$SHOW_IDENTITY" == "1" ]]; then
+    echo "${k:0:4}…${k: -4}"
+    return
+  fi
+  echo "${k:0:4}************${k: -4}"
+}
+
 aws_preflight_run() {
   ERRORS=0
   log "=== AWS preflight (fail-fast) ==="
+  if [[ "$SHOW_IDENTITY" != "1" ]]; then
+    info "identity fields masked (account/ARN). Full values: AWS_PREFLIGHT_SHOW_IDENTITY=1"
+  fi
 
   # --- 1. Python ---
   if ! command -v python3 >/dev/null 2>&1; then
@@ -84,20 +160,13 @@ aws_preflight_run() {
     die
   fi
 
-  # --- 4. Profile discovery (no fragile eval of free-form text) ---
+  # --- 4. Profile discovery ---
   log "--- Profiles ---"
   python3 "$DETECT" --list || true
 
   PROFILE="$(python3 "$DETECT" 2>/dev/null || true)"
-  PROFILE="${PROFILE//$'\r'/}"
   PROFILE="${PROFILE//$'\n'/}"
   REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
-
-  export AWS_PROFILE="${PROFILE}"
-  export AWS_REGION="$REGION"
-  export AWS_DEFAULT_REGION="$REGION"
-  export TF_VAR_aws_profile="${PROFILE}"
-  export TF_VAR_aws_region="$REGION"
 
   if [[ -n "$PROFILE" ]]; then
     ok "using profile: $PROFILE"
@@ -106,19 +175,26 @@ aws_preflight_run() {
   fi
   ok "region: $REGION"
 
-  # --- 5. Credentials file hints ---
-  AWS_HOME="${AWS_SHARED_CREDENTIALS_FILE:-$HOME/.aws/credentials}"
-  AWS_CFG="${AWS_CONFIG_FILE:-$HOME/.aws/config}"
-  if [[ -f "$AWS_HOME" ]] || [[ -f "$AWS_CFG" ]]; then
+  if [[ -f "$HOME/.aws/credentials" ]] || [[ -f "$HOME/.aws/config" ]]; then
     ok "~/.aws config/credentials found"
   else
-    if [[ -z "${AWS_ACCESS_KEY_ID:-}" ]]; then
-      fail "no ~/.aws credentials/config and AWS_ACCESS_KEY_ID unset"
-      info "Run: aws configure --profile default   (or create profile 'brian')"
-      bump
-    else
-      ok "AWS_ACCESS_KEY_ID present in environment"
-    fi
+    warn "~/.aws config/credentials not found — relying on env or instance role"
+  fi
+
+  # --- 5. Env keys present? (never print values) ---
+  if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
+    ok "AWS_ACCESS_KEY_ID present in environment ($(mask_access_key_id "$AWS_ACCESS_KEY_ID"))"
+  fi
+  if [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+    ok "AWS_SECRET_ACCESS_KEY present in environment (value hidden)"
+  fi
+  if [[ -n "${AWS_SESSION_TOKEN:-}" ]]; then
+    ok "AWS_SESSION_TOKEN present in environment (value hidden)"
+  fi
+
+  if [[ -z "${PROFILE}" && -z "${AWS_ACCESS_KEY_ID:-}" && -z "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" ]]; then
+    # still try default chain (SSO / shared)
+    :
   fi
 
   if [[ "$ERRORS" -gt 0 ]]; then
@@ -139,22 +215,24 @@ aws_preflight_run() {
   set -e
   if [[ "$STS_RC" -ne 0 ]]; then
     fail "sts get-caller-identity failed (credentials invalid or expired)"
-    sed 's/^/         /' "$STS_ERR" >&2 || true
+    # Strip anything that looks like a key from error text
+    sed -E 's/(AKIA[A-Z0-9]{16})/[ACCESS_KEY_REDACTED]/g; s/(ASIA[A-Z0-9]{16})/[ACCESS_KEY_REDACTED]/g' "$STS_ERR" | sed 's/^/         /' >&2 || true
     info "Fix: aws configure --profile ${PROFILE:-default}"
     info "  or refresh SSO: aws sso login --profile ${PROFILE:-default}"
-    info "  or export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY"
+    info "  or export AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (never commit these)"
     rm -f "$STS_OUT" "$STS_ERR"
     bump
     die
   fi
   ACCOUNT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["Account"])' "$STS_OUT")
   ARN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["Arn"])' "$STS_OUT")
-  ok "account: $ACCOUNT"
-  ok "identity: $ARN"
+  ok "account: $(mask_account "$ACCOUNT")"
+  ok "identity: $(mask_arn "$ARN")"
   rm -f "$STS_OUT" "$STS_ERR"
 
   # --- 7. Region / EC2 / S3 ---
   log "--- Service reachability ---"
+  STS_ERR=$(mktemp)
   set +e
   if [[ -n "$PROFILE" ]]; then
     aws ec2 describe-regions --region "$REGION" --profile "$PROFILE" --query 'Regions[0].RegionName' --output text >/dev/null 2>"$STS_ERR"
@@ -187,6 +265,7 @@ aws_preflight_run() {
   fi
 
   ok "IAM/STS path usable for instance profiles (full IAM checked at apply)"
+  rm -f "$STS_ERR"
 
   # --- 8. Terraform files + seed ---
   log "--- Terraform files ---"
@@ -229,7 +308,7 @@ aws_preflight_run() {
   fi
 
   log "=== PREFLIGHT PASSED — safe to plan/apply ==="
-  info "profile=${PROFILE:-<default-chain>} region=$REGION account=$ACCOUNT"
+  info "profile=${PROFILE:-<default-chain>} region=$REGION account=$(mask_account "$ACCOUNT")"
   info "next: bash scripts/aws_up.sh plan"
   info "then: bash scripts/aws_up.sh apply"
   return 0
@@ -238,10 +317,8 @@ aws_preflight_run() {
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   aws_preflight_run
   if [[ "$DO_EXPORT" -eq 1 ]]; then
-    echo "export AWS_PROFILE=\"${AWS_PROFILE:-}\""
-    echo "export AWS_REGION=\"${AWS_REGION:-us-east-1}\""
-    echo "export AWS_DEFAULT_REGION=\"${AWS_DEFAULT_REGION:-us-east-1}\""
-    echo "export TF_VAR_aws_profile=\"${TF_VAR_aws_profile:-}\""
-    echo "export TF_VAR_aws_region=\"${TF_VAR_aws_region:-us-east-1}\""
+    # Export profile/region only — never secrets
+    echo "export AWS_PROFILE=${PROFILE:-}"
+    echo "export AWS_DEFAULT_REGION=${REGION:-us-east-1}"
   fi
 fi
