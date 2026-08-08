@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Pharmacy AI Assistant — one-command orchestrator
+# Pharmacy AI Assistant — unified orchestrator (local Docker + AWS)
 #
-# Every long path runs preflight FIRST (fail-fast):
-#   local Docker  → scripts/preflight.sh local
-#   AWS           → scripts/preflight.sh aws  (→ aws_preflight.sh)
+# Assessment / demo (one seamless path):
+#   bash scripts/run.sh full          # preflight all → Docker up → AWS plan+apply
+#   bash scripts/run.sh full --yes    # same, no apply confirmation
 #
-# Usage:
-#   bash scripts/run.sh                 # preflight local + start Docker stack
-#   bash scripts/run.sh preflight       # local checks only
-#   bash scripts/run.sh preflight all   # local + AWS
+# Day-to-day local only:
+#   bash scripts/run.sh               # preflight local + Docker only
 #   bash scripts/run.sh stop|status|logs|test
-#   bash scripts/run.sh aws             # AWS preflight + terraform plan
+#
+# AWS only:
 #   bash scripts/run.sh aws preflight|plan|apply|destroy
+#
+# Checks:
+#   bash scripts/run.sh preflight all
 # =============================================================================
 set -euo pipefail
 
@@ -33,6 +35,13 @@ OLLAMA_EMBED_MODEL="${OLLAMA_EMBED_MODEL:-nomic-embed-text}"
 FRONTEND_URL="${FRONTEND_URL:-http://localhost:3000}"
 BACKEND_URL="${BACKEND_URL:-http://localhost:8000}"
 HEALTH_URL="${HEALTH_URL:-http://localhost:8000/api/health}"
+FULL_YES=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --yes|-y) FULL_YES=1 ;;
+  esac
+done
 
 run_preflight() {
   local mode="${1:-local}"
@@ -92,8 +101,34 @@ require_compose() {
   fi
 }
 
+print_local_banner() {
+  echo
+  echo "=============================================="
+  echo "  LOCAL STACK"
+  echo "  Frontend:  $FRONTEND_URL"
+  echo "  Backend:   $BACKEND_URL/docs"
+  echo "  Health:    $HEALTH_URL"
+  echo "=============================================="
+}
+
+print_aws_banner() {
+  echo
+  echo "=============================================="
+  echo "  AWS (Terraform outputs)"
+  if [[ -d "$ROOT/terraform" ]] && command -v terraform >/dev/null 2>&1; then
+    (
+      cd "$ROOT/terraform"
+      terraform output 2>/dev/null || echo "  (no outputs yet — run apply)"
+    )
+  else
+    echo "  (terraform not available)"
+  fi
+  echo "=============================================="
+}
+
+# Local Docker only (fast iteration)
 cmd_start() {
-  echo "=== Pharmacy AI Assistant — orchestrated start ==="
+  echo "=== STAGE 1/1 — Local Docker ==="
   run_preflight local
   echo
   require_compose
@@ -104,29 +139,82 @@ cmd_start() {
   sleep 5
   pull_models || true
   wait_http "$HEALTH_URL" "backend" 45 || true
+  print_local_banner
+  echo "Full system (Docker + AWS):  bash scripts/run.sh full"
+  echo "Stop local:                  bash scripts/run.sh stop"
+}
+
+# Seamless assessment path: local + AWS in one command
+cmd_full() {
+  echo "=== Pharmacy AI — FULL SYSTEM (local Docker + AWS) ==="
   echo
-  echo "=============================================="
-  echo "  Frontend:  $FRONTEND_URL"
-  echo "  Backend:   $BACKEND_URL/docs"
-  echo "  Health:    $HEALTH_URL"
-  echo "=============================================="
-  echo "AWS:  bash scripts/run.sh aws preflight"
-  echo "Stop: bash scripts/run.sh stop"
+
+  echo "=== STAGE 1/4 — Preflight (local + AWS) ==="
+  run_preflight all
+  echo
+
+  echo "=== STAGE 2/4 — Local Docker stack ==="
+  require_compose
+  ensure_env
+  "${COMPOSE[@]}" up --build -d
+  sleep 5
+  pull_models || true
+  wait_http "$HEALTH_URL" "backend" 45 || true
+  print_local_banner
+  echo
+
+  echo "=== STAGE 3/4 — AWS Terraform plan ==="
+  bash "$ROOT/scripts/aws_up.sh" plan
+  echo
+
+  echo "=== STAGE 4/4 — AWS Terraform apply ==="
+  if [[ "$FULL_YES" -eq 1 ]] || [[ "${RUN_FULL_YES:-}" == "1" ]]; then
+    bash "$ROOT/scripts/aws_up.sh" apply
+  else
+    echo "About to create EC2 + S3 (Free Tier defaults). Type yes to continue:"
+    read -r ans || true
+    if [[ "${ans}" == "yes" ]]; then
+      bash "$ROOT/scripts/aws_up.sh" apply
+    else
+      echo "Apply skipped. Local stack is still running."
+      echo "Later: bash scripts/run.sh aws apply"
+      print_local_banner
+      return 0
+    fi
+  fi
+
+  print_local_banner
+  print_aws_banner
+  echo
+  echo "Local demo:  open $FRONTEND_URL"
+  echo "AWS demo:    wait 10–20 min for EC2 user_data, then use terraform output frontend_url"
+  echo "Teardown:    bash scripts/run.sh stop   &&   bash scripts/run.sh aws destroy"
 }
 
 cmd_stop() {
   require_compose
-  echo "=== Stopping stack ==="
+  echo "=== Stopping local Docker stack ==="
   "${COMPOSE[@]}" down
+  echo "AWS resources (if any) are unchanged. Destroy with: bash scripts/run.sh aws destroy"
 }
 
 cmd_status() {
-  require_compose
-  echo "=== Containers ==="
-  "${COMPOSE[@]}" ps || true
+  echo "=== Local containers ==="
+  if [[ ${#COMPOSE[@]} -gt 0 ]]; then
+    "${COMPOSE[@]}" ps || true
+  else
+    echo "(compose unavailable)"
+  fi
   echo
-  echo "=== Health ==="
+  echo "=== Local health ==="
   if curl -sf "$HEALTH_URL"; then echo; else echo "Backend not reachable at $HEALTH_URL"; fi
+  echo
+  echo "=== AWS terraform outputs (if state exists) ==="
+  if [[ -d "$ROOT/terraform/.terraform" ]] || [[ -f "$ROOT/terraform/terraform.tfstate" ]]; then
+    (cd "$ROOT/terraform" && terraform output 2>/dev/null) || echo "(no outputs)"
+  else
+    echo "(no local terraform state — run: bash scripts/run.sh full)"
+  fi
 }
 
 cmd_logs() {
@@ -157,7 +245,6 @@ cmd_aws() {
       run_preflight aws
       ;;
     plan|apply|destroy|output)
-      # aws_up.sh runs aws_preflight again internally before terraform
       bash "$ROOT/scripts/aws_up.sh" "$sub"
       ;;
     *)
@@ -173,18 +260,29 @@ cmd_preflight() {
 }
 
 usage() {
-  sed -n '2,18p' "$0"
+  sed -n '2,20p' "$0"
 }
 
+# Strip --yes from positional handling
+ARGS=()
+for a in "$@"; do
+  case "$a" in
+    --yes|-y) ;;
+    *) ARGS+=("$a") ;;
+  esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
 case "${1:-start}" in
-  start|up|run)     cmd_start ;;
-  stop|down)        cmd_stop ;;
-  status)           cmd_status ;;
-  logs)             cmd_logs ;;
-  test)             cmd_test ;;
-  preflight|check)  shift || true; cmd_preflight "${1:-local}" ;;
-  aws)              shift || true; cmd_aws "${1:-plan}" ;;
-  help|-h|--help)   usage ;;
+  start|up|run)       cmd_start ;;
+  full|all|deploy)    cmd_full ;;
+  stop|down)          cmd_stop ;;
+  status)             cmd_status ;;
+  logs)               cmd_logs ;;
+  test)               cmd_test ;;
+  preflight|check)    shift || true; cmd_preflight "${1:-local}" ;;
+  aws)                shift || true; cmd_aws "${1:-plan}" ;;
+  help|-h|--help)     usage ;;
   *)
     echo "Unknown command: $1" >&2
     usage
