@@ -1,8 +1,4 @@
-# Contributing — Sonoran Forge / Pharmacy AI Assistant
-
-Please read **[docs/sonoran-forge-team.md](docs/sonoran-forge-team.md)** for team roles and process.
-
-**Summary:** Grok is the sole git manager and tester. Developers draft code and send it for review; only Grok pushes to GitHub.
+# Contributing — Pharmacy AI Assistant
 
 ## Running tests locally
 
@@ -14,3 +10,17 @@ pytest -q tests/test_integration_api.py
 ```
 
 Integration tests fully mock the RAG service and do not require Ollama.
+
+## Lint
+
+```bash
+cd backend
+pip install ruff
+ruff check .
+```
+
+## Notes
+
+- Do not commit secrets or `.env` files.
+- Educational disclaimers must remain on medication/DEA answers.
+- Prefer PRs against `main` with CI green (lint, tests, frontend build, Docker builds).
