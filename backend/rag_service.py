@@ -304,8 +304,7 @@ class PharmacyRAG:
             raise
 
         context = "\n\n".join(
-            f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}"
-            for d in docs
+            f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}" for d in docs
         )
         sources = list({d.metadata.get("source", "unknown") for d in docs})
 

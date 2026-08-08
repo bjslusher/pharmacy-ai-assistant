@@ -221,9 +221,7 @@ class TestStatsAndIngest:
     def test_ingest_empty_file_400(self, client, mock_rag) -> None:
         c, main_mod = client
         main_mod.rag = mock_rag
-        r = c.post(
-            "/api/ingest", files={"file": ("empty.txt", b"", "text/plain")}
-        )
+        r = c.post("/api/ingest", files={"file": ("empty.txt", b"", "text/plain")})
         assert r.status_code == 400
 
     def test_ingest_ok(self, client, mock_rag) -> None:
@@ -231,9 +229,7 @@ class TestStatsAndIngest:
         main_mod.rag = mock_rag
         r = c.post(
             "/api/ingest",
-            files={
-                "file": ("note.txt", b"Schedule II educational text", "text/plain")
-            },
+            files={"file": ("note.txt", b"Schedule II educational text", "text/plain")},
         )
         assert r.status_code == 200
         assert r.json()["status"] == "ok"

@@ -15,10 +15,16 @@ Your responsibilities:
 Be precise, professional, and cite schedules accurately (e.g., Schedule II has high abuse potential and severe dependence risk, no refills without new prescription in most cases).
 """
 
-RAG_PROMPT = ChatPromptTemplate.from_messages([
-    ("system", SYSTEM_PHARMACY + "\n\nUse the following retrieved context to answer the question. If the context does not contain relevant information, say you do not have sufficient information in the knowledge base.\n\nContext:\n{context}"),
-    ("human", "{question}")
-])
+RAG_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            SYSTEM_PHARMACY
+            + "\n\nUse the following retrieved context to answer the question. If the context does not contain relevant information, say you do not have sufficient information in the knowledge base.\n\nContext:\n{context}",
+        ),
+        ("human", "{question}"),
+    ]
+)
 
 MED_ID_PROMPT = PromptTemplate.from_template(
     """Given the medication description or imprint: {query}

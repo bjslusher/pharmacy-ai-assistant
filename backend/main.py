@@ -283,8 +283,7 @@ async def ingest(file: Annotated[UploadFile, File()]):
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Unsupported file type '{suffix}'. "
-                f"Allowed: {sorted(ALLOWED_UPLOAD_SUFFIXES)}"
+                f"Unsupported file type '{suffix}'. Allowed: {sorted(ALLOWED_UPLOAD_SUFFIXES)}"
             ),
         )
     content = await file.read()
