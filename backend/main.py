@@ -60,24 +60,30 @@ def _error_body(
     return body
 
 
+def _init_rag() -> PharmacyRAG:
+    """Build PharmacyRAG + Chroma index. Raises on failure."""
+    service = PharmacyRAG()
+    service.ensure_index()
+    count = service.document_count()
+    logger.info("RAG ready. Documents indexed: %s", count)
+    if count == 0:
+        logger.warning(
+            "No documents indexed. Add files under backend/source_data/ "
+            "or POST /api/ingest. Answers may be low-quality until then."
+        )
+    return service
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global rag, _startup_error
     logger.info("Initializing Pharmacy RAG service...")
     try:
-        rag = PharmacyRAG()
-        rag.ensure_index()
-        count = rag.document_count()
-        logger.info("RAG ready. Documents indexed: %s", count)
-        if count == 0:
-            logger.warning(
-                "No documents indexed. Add files under backend/source_data/ "
-                "or POST /api/ingest. Answers may be low-quality until then."
-            )
+        rag = _init_rag()
         _startup_error = None
     except Exception as e:
         _startup_error = str(e)
-        logger.exception("RAG startup failed: %s", e)
+        logger.exception("RAG startup failed (will retry on first request): %s", e)
         rag = None
     yield
     logger.info("Shutting down.")
@@ -89,7 +95,7 @@ app = FastAPI(
         "Medication identification and DEA regulations assistant (Assessment III). "
         "Educational use only. Supports JSON, SSE streaming, and LangGraph agent chat."
     ),
-    version="1.2.0",
+    version="1.2.1",
     lifespan=lifespan,
 )
 
@@ -215,18 +221,30 @@ class HealthResponse(BaseModel):
 
 
 def _require_rag() -> PharmacyRAG:
-    if rag is None:
+    """Return ready RAG; retry init if startup lost the Ollama model race."""
+    global rag, _startup_error
+    if rag is not None:
+        return rag
+
+    logger.info("RAG not ready — retrying init (Ollama/models may be up now)...")
+    try:
+        rag = _init_rag()
+        _startup_error = None
+        return rag
+    except Exception as e:
+        _startup_error = str(e)
+        logger.exception("RAG retry failed: %s", e)
         hint = (
-            "Backend started but RAG failed to initialize. "
-            "Check Ollama is running and models are pulled (bash scripts/run.sh)."
+            "Backend could not build the Chroma index. "
+            "Ensure Ollama is up and models are pulled: "
+            "docker compose exec ollama ollama pull nomic-embed-text "
+            "&& docker compose exec ollama ollama pull llama3.2:3b "
+            "&& docker compose restart backend"
         )
-        if _startup_error:
-            hint = f"{hint} Startup error: {_startup_error}"
         raise HTTPException(
             status_code=503,
-            detail=f"RAG service not ready. {hint}",
-        )
-    return rag
+            detail=f"RAG service not ready. {hint} Last error: {e}",
+        ) from e
 
 
 def _safe_chroma_status(service: Any) -> dict[str, Any] | None:
@@ -252,6 +270,13 @@ def _safe_chroma_status(service: Any) -> dict[str, Any] | None:
 
 
 def _health_payload() -> HealthResponse:
+    # Soft retry on health so UI can recover without a full container restart
+    global rag
+    if rag is None:
+        try:
+            _require_rag()
+        except HTTPException:
+            pass
     status = "healthy" if rag is not None else "degraded"
     return HealthResponse(
         status=status,
