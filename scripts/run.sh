@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pharmacy AI Assistant orchestrator
 # --yes exports FULL_YES so GPU selection uses the detected device
+# stop ends with post-flight Assessment III rubric audit
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,6 +29,15 @@ run_preflight() {
   local mode="${1:-local}"
   [[ -f "$ROOT/scripts/preflight.sh" ]] || { ui_fail "scripts/preflight.sh missing"; exit 1; }
   FULL_YES="$FULL_YES" RUN_FULL_YES="${RUN_FULL_YES:-$FULL_YES}" bash "$ROOT/scripts/preflight.sh" "$mode"
+}
+
+run_postflight() {
+  ui_section "Post-flight — Assessment III deliverable audit"
+  if [[ -f "$ROOT/scripts/postflight.sh" ]]; then
+    bash "$ROOT/scripts/postflight.sh" || true
+  else
+    ui_warn "scripts/postflight.sh missing"
+  fi
 }
 
 configure_compose() {
@@ -144,6 +154,9 @@ cmd_stop() {
     if [[ "$FULL_YES" -eq 1 || "${RUN_FULL_YES:-}" == "1" ]]; then bash "$ROOT/scripts/aws_up.sh" destroy
     else echo "Type yes to destroy AWS:"; read -r ans || true; [[ "${ans}" == "yes" ]] && bash "$ROOT/scripts/aws_up.sh" destroy || ui_skip "AWS left"; fi
   else ui_skip "no terraform state"; fi
+
+  # Always audit deliverables after teardown
+  run_postflight
 }
 
 cmd_status() {
@@ -185,6 +198,7 @@ case "${1:-start}" in
   logs) cmd_logs ;;
   test) cmd_test ;;
   preflight|check) shift || true; run_preflight "${1:-local}" ;;
+  postflight|audit) run_postflight ;;
   aws) shift || true; cmd_aws "${1:-plan}" ;;
   *) echo "Unknown: $1" >&2; exit 1 ;;
 esac
