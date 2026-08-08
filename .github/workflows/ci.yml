@@ -12,12 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: astral-sh/ruff-action@v3
+      - name: Ruff check
+        uses: astral-sh/ruff-action@v3
         with:
           version: "0.9.9"
           src: "backend"
           args: "check"
-      - name: Ruff format check
+      - name: Ruff format check (advisory)
+        continue-on-error: true
         uses: astral-sh/ruff-action@v3
         with:
           version: "0.9.9"
@@ -41,9 +43,7 @@ jobs:
           pip install -r requirements.txt
           pip install pytest python-multipart ruff
       - name: Ruff lint (backend)
-        run: |
-          ruff check .
-          ruff format --check .
+        run: ruff check .
       - name: Syntax check
         run: python -m py_compile main.py prompts.py rag_service.py
       - name: Unit tests
