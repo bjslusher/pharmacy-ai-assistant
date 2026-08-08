@@ -64,6 +64,7 @@ Include a short educational disclaimer.
 """
 )
 
+# Street / short names → formal terms for better Chroma ranking
 TERM_ALIASES = {
     "oxy": "oxycodone",
     "percs": "oxycodone acetaminophen",
@@ -79,9 +80,31 @@ TERM_ALIASES = {
     "suboxone": "buprenorphine naloxone",
     "perc": "oxycodone acetaminophen",
     "hydro": "hydrocodone",
+    # Schedule short forms
+    "c2": "Schedule II",
+    "c-2": "Schedule II",
+    "cii": "Schedule II",
+    "c ii": "Schedule II",
+    "c3": "Schedule III",
+    "c-3": "Schedule III",
+    "ciii": "Schedule III",
+    "c iii": "Schedule III",
+    "c4": "Schedule IV",
+    "c-4": "Schedule IV",
+    "civ": "Schedule IV",
+    "c5": "Schedule V",
+    "c-5": "Schedule V",
+    "cv": "Schedule V",
+    "schedule ii": "Schedule II",
+    "schedule iii": "Schedule III",
+    "schedule iv": "Schedule IV",
+    "schedule v": "Schedule V",
+    # Med-ID helpers
+    "imprint": "tablet imprint code",
+    "ndc": "National Drug Code",
 }
 
-# Tablet imprint codes in seed data (boost retrieval when user types the code)
+# Explicit imprint codes in seed data (boost retrieval when user types the code)
 IMPRINT_BOOST = {
     "m367": "imprint M367 hydrocodone bitartrate 10 mg acetaminophen 325 mg Schedule II white oval",
     "m366": "imprint M366 hydrocodone 7.5 mg acetaminophen 325 mg",
@@ -97,7 +120,7 @@ _IMPRINT_TOKEN = re.compile(r"\b([A-Za-z]{1,4}\s?\d{2,4}|\d{2,4}\s?[A-Za-z]{1,4}
 
 
 def expand_query(query: str) -> str:
-    """Expand slang + imprint codes so Chroma similarity ranks the right seed chunks."""
+    """Expand slang, schedules, NDC/imprint terms so Chroma ranks the right seed chunks."""
     if not query or not str(query).strip():
         return query
     lower = query.lower()
@@ -107,21 +130,24 @@ def expand_query(query: str) -> str:
     items = sorted(TERM_ALIASES.items(), key=lambda kv: len(kv[0]), reverse=True)
     for alias, formal in items:
         pattern = r"(?<!\w)" + re.escape(alias) + r"(?!\w)"
-        if re.search(pattern, lower) and formal not in seen:
+        if re.search(pattern, lower, flags=re.IGNORECASE) and formal not in seen:
             expansions.append(formal)
             seen.add(formal)
 
-    # Explicit imprint boost map
+    # Explicit imprint boost map (M367 → hydrocodone …)
     for code, boost in IMPRINT_BOOST.items():
-        if re.search(r"(?<!\w)" + re.escape(code).replace(r"\ ", r"\s*") + r"(?!\w)", lower):
+        code_pat = r"(?<!\w)" + re.escape(code).replace(r"\ ", r"\s*") + r"(?!\w)"
+        if re.search(code_pat, lower):
             if boost not in seen:
                 expansions.append(boost)
                 seen.add(boost)
 
-    # Generic imprint token → "imprint CODE identification"
+    # Generic imprint token → extra "imprint CODE identification" (skip pure schedule tokens)
     for m in _IMPRINT_TOKEN.finditer(query):
         token = m.group(1)
         compact = re.sub(r"\s+", "", token).upper()
+        if compact.lower() in {"c2", "c3", "c4", "c5", "cii", "ciii", "civ", "cv"}:
+            continue
         boost = f"imprint code {token} {compact} tablet identification"
         if boost not in seen:
             expansions.append(boost)
