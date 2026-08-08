@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -26,9 +27,15 @@ CHUNK_SIZE = 900
 CHUNK_OVERLAP = 150
 
 DEFAULT_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
+MED_ID_TOP_K = int(os.getenv("RAG_MED_ID_TOP_K", "6"))
 DEFAULT_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "350"))
 DEFAULT_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+
+_IMPRINT_HINT = re.compile(
+    r"\b(imprint|tablet|pill|ndc|identify|medication|m\s?\d{3}|[a-z]{1,4}\s?\d{2,4})\b",
+    re.I,
+)
 
 
 def _banner(msg: str) -> None:
@@ -58,6 +65,7 @@ class PharmacyRAG:
     def __init__(self):
         self.provider = os.getenv("LLM_PROVIDER", "ollama").lower()
         self.top_k = max(1, int(os.getenv("RAG_TOP_K", str(DEFAULT_TOP_K))))
+        self.med_id_top_k = max(self.top_k, int(os.getenv("RAG_MED_ID_TOP_K", str(MED_ID_TOP_K))))
         try:
             self.embeddings = self._build_embeddings()
             self.llm = self._build_llm()
@@ -78,7 +86,7 @@ class PharmacyRAG:
         )
         _banner(
             f"RAG config provider={self.provider} model={os.getenv('OLLAMA_MODEL', DEFAULT_MODEL)} "
-            f"top_k={self.top_k} chroma_path={CHROMA_PATH}"
+            f"top_k={self.top_k} med_id_top_k={self.med_id_top_k} chroma_path={CHROMA_PATH}"
         )
 
     def _build_embeddings(self):
@@ -200,7 +208,6 @@ class PharmacyRAG:
             ) from e
 
     def index_status(self) -> dict[str, Any]:
-        """Telemetry for /api/health and orchestrator."""
         count = self.document_count()
         sources: list[str] = []
         try:
@@ -208,11 +215,7 @@ class PharmacyRAG:
                 raw = self.vectorstore._collection.get(include=["metadatas"])
                 metas = raw.get("metadatas") or []
                 sources = sorted(
-                    {
-                        (m or {}).get("source", "unknown")
-                        for m in metas
-                        if isinstance(m, dict)
-                    }
+                    {(m or {}).get("source", "unknown") for m in metas if isinstance(m, dict)}
                 )
         except Exception as e:
             logger.debug("index_status sources failed: %s", e)
@@ -241,10 +244,7 @@ class PharmacyRAG:
                         text = p.read_text(encoding="utf-8", errors="ignore")
                         if text.strip():
                             docs.append(
-                                Document(
-                                    page_content=text,
-                                    metadata={"source": p.name},
-                                )
+                                Document(page_content=text, metadata={"source": p.name})
                             )
                             _banner(f"Loaded source file: {p.name} ({len(text)} chars)")
                     except OSError as e:
@@ -266,9 +266,7 @@ class PharmacyRAG:
         safe_name = Path(filename).name
         if not safe_name or safe_name in {".", ".."}:
             raise RAGServiceError(
-                "Invalid upload filename",
-                code="INVALID_FILENAME",
-                http_status=400,
+                "Invalid upload filename", code="INVALID_FILENAME", http_status=400
             )
         dest_dir = Path(os.getenv("DATA_PATH", "./source_data"))
         try:
@@ -278,18 +276,13 @@ class PharmacyRAG:
             return path
         except OSError as e:
             raise RAGServiceError(
-                "Failed to save upload",
-                code="UPLOAD_SAVE_FAILED",
-                detail=str(e),
-                http_status=500,
+                "Failed to save upload", code="UPLOAD_SAVE_FAILED", detail=str(e), http_status=500
             ) from e
 
     def ingest_file(self, path: Path) -> int:
         if not self.vectorstore:
             raise RAGServiceError(
-                "Vector store not initialized",
-                code="INDEX_NOT_READY",
-                http_status=503,
+                "Vector store not initialized", code="INDEX_NOT_READY", http_status=503
             )
         text = ""
         suffix = path.suffix.lower()
@@ -303,7 +296,6 @@ class PharmacyRAG:
                     reader = PdfReader(str(path))
                     text = "\n".join(page.extract_text() or "" for page in reader.pages)
                 except Exception as e:
-                    logger.error("PDF extract failed for %s: %s", path, e)
                     raise RAGServiceError(
                         "PDF extraction failed",
                         code="PDF_EXTRACT_FAILED",
@@ -312,18 +304,13 @@ class PharmacyRAG:
                     ) from e
             else:
                 raise RAGServiceError(
-                    f"Unsupported file type: {suffix}",
-                    code="UNSUPPORTED_TYPE",
-                    http_status=400,
+                    f"Unsupported file type: {suffix}", code="UNSUPPORTED_TYPE", http_status=400
                 )
         except RAGServiceError:
             raise
         except OSError as e:
             raise RAGServiceError(
-                "Could not read uploaded file",
-                code="FILE_READ_FAILED",
-                detail=str(e),
-                http_status=400,
+                "Could not read uploaded file", code="FILE_READ_FAILED", detail=str(e), http_status=400
             ) from e
 
         if not text.strip():
@@ -362,12 +349,19 @@ class PharmacyRAG:
                 http_status=503,
             ) from e
 
+    def _k_for_mode(self, mode: str, question: str) -> int:
+        if mode == "med_id" or _IMPRINT_HINT.search(question or ""):
+            return self.med_id_top_k
+        return self.top_k
+
     def _build_context(
         self,
         question: str,
         user_id: str = "default",
+        mode: str = "general",
     ) -> tuple[str, list[str]]:
-        docs = self._retrieve(question)
+        k = self._k_for_mode(mode, question)
+        docs = self._retrieve(question, k=k)
         context = "\n\n".join(
             f"[Source: {d.metadata.get('source', 'unknown')}]\n{d.page_content}" for d in docs
         )
@@ -384,13 +378,6 @@ class PharmacyRAG:
                 logger.warning("Mem0 search failed (non-fatal): %s", e)
 
         return context, sources
-
-    def _prompt_for_mode(self, mode: str):
-        if mode == "med_id":
-            return MED_ID_PROMPT
-        if mode == "dea":
-            return DEA_QUERY_PROMPT
-        return RAG_PROMPT
 
     def _invoke_chain(self, mode: str, question: str, context: str) -> str:
         if mode == "med_id":
@@ -432,14 +419,10 @@ class PharmacyRAG:
         mode: str = "general",
     ) -> dict[str, Any]:
         if not question or not str(question).strip():
-            raise RAGServiceError(
-                "Empty question",
-                code="EMPTY_QUERY",
-                http_status=400,
-            )
+            raise RAGServiceError("Empty question", code="EMPTY_QUERY", http_status=400)
 
         try:
-            context, sources = self._build_context(question, user_id=user_id)
+            context, sources = self._build_context(question, user_id=user_id, mode=mode)
         except RAGServiceError:
             raise
 
@@ -478,13 +461,9 @@ class PharmacyRAG:
         mode: str = "general",
     ) -> Iterator[dict[str, Any]]:
         if not question or not str(question).strip():
-            raise RAGServiceError(
-                "Empty question",
-                code="EMPTY_QUERY",
-                http_status=400,
-            )
+            raise RAGServiceError("Empty question", code="EMPTY_QUERY", http_status=400)
 
-        context, sources = self._build_context(question, user_id=user_id)
+        context, sources = self._build_context(question, user_id=user_id, mode=mode)
         pieces: list[str] = []
         try:
             for token in self._stream_chain(mode, question, context):
