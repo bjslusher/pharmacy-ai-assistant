@@ -2,7 +2,12 @@
 # =============================================================================
 # Pharmacy AI Assistant — unified preflight (FAIL FAST)
 # Modes: local | aws | all
-# GPU: scripts/gpu_select.sh prompts when NVIDIA is found; saves preference
+#
+# Order (local/all):
+#   1) Pytest TA banner (total / passed / failed)
+#   2) Docker + tools
+#   3) GPU detect + named device prompt
+#   4) Seed files / ports / disk
 # =============================================================================
 set -euo pipefail
 
@@ -27,17 +32,111 @@ die_if_errors() {
   fi
   echo "=== PREFLIGHT PASSED ($MODE) ==="
   if [[ "$MODE" == "local" || "$MODE" == "docker" || "$MODE" == "stack" || "$MODE" == "all" || "$MODE" == "full" ]]; then
-    local status="cpu"
+    local status="cpu" name="(none)"
     [[ -f "$ROOT/.gpu_status" ]] && status="$(tr -d '[:space:]' < "$ROOT/.gpu_status")"
     [[ -f "$ROOT/.gpu_preference" ]] && GPU_PREF="$(tr -d '[:space:]' < "$ROOT/.gpu_preference")"
-    echo "=== GPU CAPABILITY: $status | PREFERENCE: $GPU_PREF ==="
+    [[ -f "$ROOT/.gpu_name" ]] && name="$(tr -d '\n' < "$ROOT/.gpu_name")"
+    echo "=== GPU: $name | CAPABILITY: $status | PREFERENCE: $GPU_PREF ==="
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Pytest first — TA visual checkpoint
+# ---------------------------------------------------------------------------
+run_pytest_banner() {
+  echo "=== PYTEST (TA checkpoint) ==="
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    fail "python3 not found — cannot run unit tests"
+    echo "  Total: 0 | Passed: 0 | Failed: 0 | Status: SKIPPED (no python3)"
+    return 0
+  fi
+
+  if [[ ! -d "$ROOT/backend/tests" ]]; then
+    fail "backend/tests/ missing"
+    echo "  Total: 0 | Passed: 0 | Failed: 0 | Status: SKIPPED (no tests dir)"
+    return 0
+  fi
+
+  local venv="$ROOT/backend/.venv"
+  local py pip
+  if [[ ! -d "$venv" ]]; then
+    info "Creating backend/.venv for tests…"
+    if ! python3 -m venv "$venv" 2>/dev/null; then
+      fail "could not create backend/.venv"
+      echo "  Total: 0 | Passed: 0 | Failed: 0 | Status: SKIPPED (venv)"
+      return 0
+    fi
+  fi
+  py="$venv/bin/python"
+  pip="$venv/bin/pip"
+
+  # Quiet deps install — enough for mocked unit/integration/stress suite
+  "$pip" install -q --upgrade pip >/dev/null 2>&1 || true
+  if ! "$pip" install -q \
+      "fastapi==0.115.0" \
+      "uvicorn[standard]==0.30.6" \
+      "pydantic>=2.9.2,<3" \
+      "python-multipart==0.0.9" \
+      "httpx>=0.27.2,<0.29" \
+      "pytest>=8.3.3" \
+      "langchain-core>=0.3.6,<0.4" >/dev/null 2>&1; then
+    warn "pip install of test deps had issues — attempting pytest anyway"
+  fi
+
+  local out rc=0
+  set +e
+  out="$(cd "$ROOT/backend" && PYTHONPATH=. "$py" -m pytest -q tests/ --tb=no 2>&1)"
+  rc=$?
+  set -e
+
+  # Parse pytest summary line: "56 passed", "2 failed, 54 passed", "3 passed, 1 warning"
+  local passed=0 failed=0 errors=0 skipped=0 total=0
+  if echo "$out" | grep -qoE '[0-9]+ passed'; then
+    passed="$(echo "$out" | grep -oE '[0-9]+ passed' | tail -1 | awk '{print $1}')"
+  fi
+  if echo "$out" | grep -qoE '[0-9]+ failed'; then
+    failed="$(echo "$out" | grep -oE '[0-9]+ failed' | tail -1 | awk '{print $1}')"
+  fi
+  if echo "$out" | grep -qoE '[0-9]+ error'; then
+    errors="$(echo "$out" | grep -oE '[0-9]+ error' | tail -1 | awk '{print $1}')"
+  fi
+  if echo "$out" | grep -qoE '[0-9]+ skipped'; then
+    skipped="$(echo "$out" | grep -oE '[0-9]+ skipped' | tail -1 | awk '{print $1}')"
+  fi
+  total=$((passed + failed + errors))
+
+  echo
+  echo "  ┌──────────────────────────────────────────────┐"
+  echo "  │  PYTEST RESULTS (backend/tests)             │"
+  echo "  │  Total performed:  ${total}"
+  echo "  │  Passed:           ${passed}"
+  echo "  │  Failed:           ${failed}"
+  echo "  │  Errors:           ${errors}"
+  echo "  │  Skipped:          ${skipped}"
+  if [[ "$rc" -eq 0 && "$failed" -eq 0 && "$errors" -eq 0 && "$total" -gt 0 ]]; then
+    echo "  │  Status:           PASS                     │"
+    echo "  └──────────────────────────────────────────────┘"
+    ok "pytest: ${total} tests performed — ${passed} passed, ${failed} failed"
+  elif [[ "$total" -eq 0 ]]; then
+    echo "  │  Status:           NO TESTS / COLLECT FAIL  │"
+    echo "  └──────────────────────────────────────────────┘"
+    fail "pytest: no tests collected or runner failed"
+    info "Last lines:"
+    echo "$out" | tail -8 | sed 's/^/    /'
+  else
+    echo "  │  Status:           FAIL                     │"
+    echo "  └──────────────────────────────────────────────┘"
+    fail "pytest: ${total} tests performed — ${passed} passed, ${failed} failed, ${errors} errors"
+    info "Failing summary:"
+    echo "$out" | tail -15 | sed 's/^/    /'
+  fi
+  echo
 }
 
 check_gpu() {
   echo "--- GPU / acceleration ---"
   if [[ -f "$ROOT/scripts/gpu_select.sh" ]]; then
-    # Interactive prompt lives here (TTY). Env: GPU_PREFERENCE / FORCE_GPU_PROMPT
     bash "$ROOT/scripts/gpu_select.sh"
     if [[ -f "$ROOT/.gpu_preference" ]]; then
       GPU_PREF="$(tr -d '[:space:]' < "$ROOT/.gpu_preference")"
@@ -46,13 +145,19 @@ check_gpu() {
     warn "scripts/gpu_select.sh missing — defaulting to cpu"
     printf 'cpu\n' > "$ROOT/.gpu_status"
     printf 'cpu\n' > "$ROOT/.gpu_preference"
+    printf '(none)\n' > "$ROOT/.gpu_name"
     GPU_PREF=cpu
   fi
 }
 
 preflight_local() {
   echo "=== Preflight: local Docker stack ==="
+  echo
 
+  # 1) Tests first for TAs
+  run_pytest_banner
+
+  echo "--- Tooling ---"
   if command -v docker >/dev/null 2>&1; then
     ok "docker: $(docker --version 2>&1 | head -1)"
   else
@@ -90,6 +195,7 @@ preflight_local() {
 
   check_gpu
 
+  echo "--- Project files ---"
   [[ -f "$ROOT/docker-compose.yml" ]] && ok "docker-compose.yml" || fail "missing docker-compose.yml"
   [[ -f "$ROOT/docker-compose.gpu.yml" ]] && ok "docker-compose.gpu.yml (GPU overlay)" || warn "missing docker-compose.gpu.yml"
   [[ -f "$ROOT/backend/Dockerfile" ]] && ok "backend/Dockerfile" || fail "missing backend/Dockerfile"
@@ -102,7 +208,7 @@ preflight_local() {
     seed=$(find "$ROOT/backend/source_data" -type f -name '*.txt' 2>/dev/null | wc -l | tr -d ' ')
   fi
   if [[ "${seed:-0}" -ge 1 ]]; then
-    ok "seed knowledge files: $seed (backend/source_data) — these become Chroma embeddings"
+    ok "seed knowledge files: $seed (backend/source_data) — become Chroma embeddings"
     for f in common_controlled_imprints.txt dea_schedules_overview.txt pharmacist_responsibilities.txt; do
       if [[ -f "$ROOT/backend/source_data/$f" ]]; then
         ok "  seed: $f"
@@ -155,6 +261,7 @@ preflight_local() {
       info "skip port check for $port (ss/netstat not available)"
     fi
   }
+  echo "--- Ports ---"
   check_port 3000 "frontend"
   check_port 8000 "backend API"
   check_port 11434 "ollama"
@@ -162,7 +269,7 @@ preflight_local() {
   if command -v python3 >/dev/null 2>&1; then
     ok "python3: $(python3 --version 2>&1)"
   else
-    warn "python3 not found — local pytest via run.sh test will fail"
+    warn "python3 not found"
   fi
 }
 
@@ -201,7 +308,7 @@ case "$MODE" in
     die_if_errors
     ;;
   -h|--help|help)
-    sed -n '2,12p' "$0"
+    sed -n '2,14p' "$0"
     exit 0
     ;;
   *)

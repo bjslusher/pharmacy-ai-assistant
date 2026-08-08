@@ -5,30 +5,43 @@
 # Writes:
 #   .gpu_status       — hardware capability: gpu | cpu
 #   .gpu_preference   — user choice: gpu | cpu
+#   .gpu_name         — human-readable device name from nvidia-smi
 #
-# Env overrides (non-interactive):
-#   GPU_PREFERENCE=gpu|cpu
-#   GPU_MODE=gpu|cpu          (alias for preference)
-#   FORCE_GPU_PROMPT=1        re-ask even if preference file exists
+# Env: GPU_PREFERENCE=gpu|cpu  GPU_MODE=gpu|cpu  FORCE_GPU_PROMPT=1
 # =============================================================================
 set -euo pipefail
 
 ROOT="${ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 STATUS_FILE="$ROOT/.gpu_status"
 PREF_FILE="$ROOT/.gpu_preference"
+NAME_FILE="$ROOT/.gpu_name"
 
 ok()   { echo "  [OK]  $*"; }
 warn() { echo "  [WARN] $*" >&2; }
 info() { echo "  $*"; }
 
+# Returns capability via stdout (gpu|cpu). Sets GPU_NAME / GPU_MEM globals.
+GPU_NAME="(none)"
+GPU_MEM=""
+GPU_DRIVER=""
+
 detect_gpu_capability() {
   local host_gpu=0 docker_gpu=0
+  GPU_NAME="(none)"
+  GPU_MEM=""
+  GPU_DRIVER=""
 
   if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
     host_gpu=1
-    ok "nvidia-smi: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null | head -1 | tr -s ' ')"
+    GPU_NAME="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    GPU_MEM="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader 2>/dev/null | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    GPU_DRIVER="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -z "$GPU_NAME" ]] && GPU_NAME="NVIDIA GPU (name unavailable)"
+    ok "Host GPU identified: ${GPU_NAME}"
+    [[ -n "$GPU_MEM" ]] && ok "  VRAM: ${GPU_MEM}"
+    [[ -n "$GPU_DRIVER" ]] && ok "  Driver: ${GPU_DRIVER}"
   else
-    warn "No working nvidia-smi on host"
+    warn "No working nvidia-smi on host — no named GPU available"
   fi
 
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
@@ -40,22 +53,23 @@ detect_gpu_capability() {
     fi
   fi
 
+  # Persist name for other scripts / status
+  printf '%s\n' "$GPU_NAME" > "$NAME_FILE"
+
   if [[ "$host_gpu" -eq 1 && "$docker_gpu" -eq 1 ]]; then
     echo gpu
   elif [[ "$host_gpu" -eq 1 ]]; then
-    warn "GPU on host but Docker may not pass it through — preference still allowed; runtime will fall back if needed"
+    warn "${GPU_NAME} is on the host but Docker may not pass it through — runtime will fall back to CPU if GPU compose fails"
     echo gpu
   else
     echo cpu
   fi
 }
 
-# Resolve preference: env > existing file > prompt (if capable) > cpu
 resolve_gpu_preference() {
   local capability="$1"
   local pref=""
 
-  # Explicit env wins
   if [[ -n "${GPU_PREFERENCE:-}" ]]; then
     pref="$(echo "$GPU_PREFERENCE" | tr '[:upper:]' '[:lower:]')"
   elif [[ -n "${GPU_MODE:-}" ]]; then
@@ -68,46 +82,47 @@ resolve_gpu_preference() {
     return 0
   fi
 
-  # Reuse saved preference unless forced
   if [[ "${FORCE_GPU_PROMPT:-0}" != "1" && -f "$PREF_FILE" ]]; then
     pref="$(tr -d '[:space:]' < "$PREF_FILE" | tr '[:upper:]' '[:lower:]')"
     if [[ "$pref" == "gpu" || "$pref" == "cpu" ]]; then
-      ok "GPU preference from .gpu_preference: $pref (set FORCE_GPU_PROMPT=1 to re-ask)"
+      ok "GPU preference from .gpu_preference: $pref (FORCE_GPU_PROMPT=1 to re-ask)"
       echo "$pref"
       return 0
     fi
   fi
 
-  # No GPU capability → force cpu
   if [[ "$capability" != "gpu" ]]; then
     warn "No usable GPU — locking preference to cpu"
     echo cpu
     return 0
   fi
 
-  # Interactive prompt when TTY available
   if [[ -t 0 ]]; then
     echo
-    echo "  NVIDIA GPU detected."
-    echo "  Use GPU for Ollama? (faster)  [Y] GPU  /  [n] CPU only"
-    echo "  GPU path will automatically fall back to CPU if container start fails."
+    echo "  ┌─────────────────────────────────────────────────────────┐"
+    echo "  │  Detected GPU: ${GPU_NAME}"
+    [[ -n "$GPU_MEM" ]] && echo "  │  VRAM:          ${GPU_MEM}"
+    [[ -n "$GPU_DRIVER" ]] && echo "  │  Driver:        ${GPU_DRIVER}"
+    echo "  └─────────────────────────────────────────────────────────┘"
+    echo
+    echo "  Use this GPU for Ollama? (faster generation)"
+    echo "    [Y] GPU  — primary path; CPU used automatically if GPU start fails"
+    echo "    [n] CPU  — skip GPU for this run"
     printf "  Choice [Y/n]: "
     read -r ans || true
     case "${ans:-Y}" in
       n|N|no|NO|cpu|CPU) pref=cpu ;;
       *) pref=gpu ;;
     esac
-    ok "Selected: $pref"
+    ok "Selected: $pref  (device: ${GPU_NAME})"
   else
-    # Non-interactive default: prefer GPU when capable
     pref=gpu
-    ok "No TTY — defaulting preference to gpu (override with GPU_PREFERENCE=cpu)"
+    ok "No TTY — defaulting to gpu for ${GPU_NAME} (override: GPU_PREFERENCE=cpu)"
   fi
 
   echo "$pref"
 }
 
-# Main: detect, choose, persist
 capability="$(detect_gpu_capability)"
 printf '%s\n' "$capability" > "$STATUS_FILE"
 ok "wrote .gpu_status=$capability"
@@ -116,4 +131,4 @@ preference="$(resolve_gpu_preference "$capability")"
 printf '%s\n' "$preference" > "$PREF_FILE"
 ok "wrote .gpu_preference=$preference"
 
-echo "=== GPU CAPABILITY: $capability | PREFERENCE: $preference ==="
+echo "=== GPU: ${GPU_NAME} | CAPABILITY: $capability | PREFERENCE: $preference ==="
