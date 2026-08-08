@@ -1,22 +1,24 @@
 """
 Pharmacy AI Assistant - FastAPI backend
 Medication identification + DEA regulations RAG with LangChain, optional Mem0.
+Speed path: small local Ollama model + streaming SSE.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import traceback
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Iterator
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 load_dotenv()
@@ -53,7 +55,6 @@ def _error_body(
         body["error"]["detail"] = detail
     if hint:
         body["error"]["hint"] = hint
-    # Keep FastAPI-style top-level detail for older clients/tests
     body["detail"] = message if not detail else f"{message}: {detail}"
     return body
 
@@ -85,9 +86,9 @@ app = FastAPI(
     title="Pharmacy AI Assistant",
     description=(
         "Medication identification and DEA regulations assistant (Assessment III). "
-        "Educational use only. Errors return structured JSON with code, message, detail, hint."
+        "Educational use only. Supports JSON and SSE streaming chat."
     ),
-    version="1.0.0",
+    version="1.1.0",
     lifespan=lifespan,
 )
 
@@ -191,6 +192,8 @@ class HealthResponse(BaseModel):
     status: str
     documents_indexed: int
     llm_provider: str
+    ollama_model: str | None = None
+    rag_top_k: int | None = None
     startup_error: str | None = None
 
 
@@ -215,6 +218,8 @@ def _health_payload() -> HealthResponse:
         status=status,
         documents_indexed=rag.document_count() if rag else 0,
         llm_provider=os.getenv("LLM_PROVIDER", "ollama"),
+        ollama_model=os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
+        rag_top_k=int(os.getenv("RAG_TOP_K", "3")),
         startup_error=_startup_error,
     )
 
@@ -225,8 +230,7 @@ def health():
     return _health_payload()
 
 
-@app.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest):
+def _run_chat(req: ChatRequest) -> ChatResponse:
     service = _require_rag()
     try:
         expanded = expand_query(req.message)
@@ -254,16 +258,68 @@ def chat(req: ChatRequest):
         raise HTTPException(status_code=500, detail=f"Query failed: {e!s}") from e
 
 
+@app.post("/api/chat", response_model=ChatResponse)
+def chat(req: ChatRequest):
+    return _run_chat(req)
+
+
+@app.post("/api/chat/stream")
+def chat_stream(req: ChatRequest):
+    """SSE stream: data: {\"token\": \"...\"} then data: {\"done\": true, ...}."""
+    service = _require_rag()
+    expanded = expand_query(req.message)
+
+    def event_gen() -> Iterator[str]:
+        try:
+            for event in service.query_stream(
+                question=expanded,
+                user_id=req.user_id,
+                session_id=req.session_id,
+                mode=req.mode,
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except RAGServiceError as e:
+            err = {
+                "error": {
+                    "code": e.code,
+                    "message": e.message,
+                    "detail": e.detail,
+                    "status": e.http_status,
+                }
+            }
+            yield f"data: {json.dumps(err)}\n\n"
+        except Exception as e:
+            logger.exception("Stream error")
+            err = {
+                "error": {
+                    "code": "LLM_GENERATION_FAILED",
+                    "message": str(e),
+                    "status": 500,
+                }
+            }
+            yield f"data: {json.dumps(err)}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/api/meds/identify", response_model=ChatResponse)
 def identify_medication(req: ChatRequest):
     forced = req.model_copy(update={"mode": "med_id"})
-    return chat(forced)
+    return _run_chat(forced)
 
 
 @app.post("/api/dea/query", response_model=ChatResponse)
 def dea_query(req: ChatRequest):
     forced = req.model_copy(update={"mode": "dea"})
-    return chat(forced)
+    return _run_chat(forced)
 
 
 ALLOWED_UPLOAD_SUFFIXES = {".txt", ".md", ".pdf"}
@@ -318,6 +374,8 @@ def stats():
     return {
         "documents": service.document_count(),
         "provider": os.getenv("LLM_PROVIDER", "ollama"),
+        "ollama_model": os.getenv("OLLAMA_MODEL", "llama3.2:3b"),
+        "rag_top_k": int(os.getenv("RAG_TOP_K", "3")),
         "mem0_enabled": bool(os.getenv("MEM0_API_KEY")),
         "startup_error": _startup_error,
     }
