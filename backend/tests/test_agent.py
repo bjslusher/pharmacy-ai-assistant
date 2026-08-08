@@ -7,14 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-import pytest
-
 BACKEND = Path(__file__).resolve().parent.parent
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from agents.tools import ChromaToolbelt, classify_intent  # noqa: E402
 from agents.graph import PharmacyAgent  # noqa: E402
+from agents.tools import ChromaToolbelt, classify_intent  # noqa: E402
 
 
 class TestClassifyIntent:
@@ -53,7 +51,6 @@ class TestPharmacyAgent:
         rag._invoke_chain.return_value = "No federal refills for Schedule II (educational)."
 
         agent = PharmacyAgent(rag)
-        # Force sequential path if graph import fails in minimal env — still OK
         result = agent.run("Can Schedule II be refilled?")
         assert result["agent"] is True
         assert result["intent"] == "dea"

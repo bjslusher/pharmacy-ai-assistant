@@ -10,9 +10,10 @@ import json
 import logging
 import os
 import traceback
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any, Iterator
+from typing import Annotated, Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
@@ -238,7 +239,6 @@ def _safe_chroma_status(service: Any) -> dict[str, Any] | None:
         return {"ready": False, "error": str(e)}
     if isinstance(raw, dict):
         return raw
-    # Mock objects / unexpected types → safe summary
     try:
         count = int(service.document_count())
     except Exception:

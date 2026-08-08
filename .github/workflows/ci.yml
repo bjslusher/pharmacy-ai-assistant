@@ -52,6 +52,7 @@ jobs:
         run: |
           pytest -q tests/test_expand_query.py tests/test_api_models.py
           pytest -q tests/test_rag_helpers.py
+          pytest -q tests/test_agent.py
       - name: Integration tests (mocked RAG)
         run: pytest -q tests/test_integration_api.py
 
@@ -78,5 +79,6 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build backend image
         run: docker build -t pharmacy-backend:ci ./backend
+      # Context must be repo root so Dockerfile can COPY frontend/* and docs/brand/*
       - name: Build frontend image
-        run: docker build -t pharmacy-frontend:ci ./frontend
+        run: docker build -f frontend/Dockerfile -t pharmacy-frontend:ci .

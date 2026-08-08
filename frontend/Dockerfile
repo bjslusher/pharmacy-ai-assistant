@@ -1,3 +1,5 @@
+# Build context MUST be the repository root (matches docker-compose.yml):
+#   docker build -f frontend/Dockerfile -t pharmacy-frontend .
 FROM node:20-alpine AS build
 WORKDIR /app
 
@@ -24,6 +26,7 @@ RUN npm run build
 
 FROM nginx:alpine
 COPY --from=build /app/dist /usr/share/nginx/html
-COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+# nginx.conf was copied into /app during build stage (COPY frontend/ ./)
+COPY --from=build /app/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 80
 CMD ["nginx", "-g", "daemon off;"]
