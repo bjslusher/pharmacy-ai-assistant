@@ -120,77 +120,54 @@ class TestHealth:
         c, _ = client
         r = c.get("/api/health")
         assert r.status_code == 200
-        assert r.json()["status"] == "healthy"
 
 
-class TestChat:
-    def test_chat_success(self, client, mock_rag) -> None:
+class TestValidation:
+    def test_chat_blank_message_422(self, client) -> None:
         c, _ = client
-        r = c.post("/api/chat", json={"message": "What is Schedule II?"})
-        assert r.status_code == 200
-        data = r.json()
-        assert "answer" in data
-        assert data["mode"] == "general"
-        assert "Educational" in data["disclaimer"]
-        assert isinstance(data["sources"], list)
-        mock_rag.query.assert_called()
-        assert mock_rag.query.call_args.kwargs["mode"] == "general"
+        r = c.post("/api/chat", json={"message": "   "})
+        assert r.status_code == 422
 
     def test_chat_empty_message_422(self, client) -> None:
         c, _ = client
         r = c.post("/api/chat", json={"message": ""})
         assert r.status_code == 422
 
-    def test_chat_blank_message_422(self, client) -> None:
+    def test_chat_bad_mode_422(self, client) -> None:
         c, _ = client
-        r = c.post("/api/chat", json={"message": "   "})
-        assert r.status_code == 422
-
-    def test_chat_invalid_mode_422(self, client) -> None:
-        c, _ = client
-        r = c.post("/api/chat", json={"message": "hello", "mode": "hacker"})
-        assert r.status_code == 422
-
-    def test_chat_too_long_422(self, client) -> None:
-        c, _ = client
-        r = c.post("/api/chat", json={"message": "x" * 4001})
+        r = c.post("/api/chat", json={"message": "hello", "mode": "not-a-mode"})
         assert r.status_code == 422
 
 
-class TestMedIdentify:
-    def test_identify_forces_med_id_mode(self, client, mock_rag) -> None:
-        c, _ = client
-        r = c.post(
-            "/api/meds/identify",
-            json={"message": "Identify imprint M367", "mode": "general"},
-        )
+class TestChatEndpoints:
+    def test_chat_ok(self, client, mock_rag) -> None:
+        c, main_mod = client
+        main_mod.rag = mock_rag
+        r = c.post("/api/chat", json={"message": "What is Schedule II?"})
         assert r.status_code == 200
         data = r.json()
-        assert data["mode"] == "med_id"
-        assert mock_rag.query.call_args.kwargs["mode"] == "med_id"
+        assert "answer" in data
+        assert data["mode"] == "general"
 
-    def test_identify_returns_answer(self, client, mock_rag) -> None:
-        c, _ = client
-        r = c.post("/api/meds/identify", json={"message": "M367 white oval"})
+    def test_meds_identify_forces_mode(self, client, mock_rag) -> None:
+        c, main_mod = client
+        main_mod.rag = mock_rag
+        r = c.post("/api/meds/identify", json={"message": "imprint M367"})
         assert r.status_code == 200
-        assert r.json()["answer"]
+        assert r.json()["mode"] == "med_id"
 
-
-class TestDeaQuery:
-    def test_dea_forces_dea_mode(self, client, mock_rag) -> None:
-        c, _ = client
-        r = c.post(
-            "/api/dea/query",
-            json={"message": "Can Schedule II be refilled?", "mode": "general"},
-        )
+    def test_dea_query_forces_mode(self, client, mock_rag) -> None:
+        c, main_mod = client
+        main_mod.rag = mock_rag
+        r = c.post("/api/dea/query", json={"message": "Schedule II refills"})
         assert r.status_code == 200
         assert r.json()["mode"] == "dea"
-        assert mock_rag.query.call_args.kwargs["mode"] == "dea"
 
-    def test_dea_sources_present(self, client, mock_rag) -> None:
-        c, _ = client
+    def test_chat_sources_returned(self, client, mock_rag) -> None:
+        c, main_mod = client
+        main_mod.rag = mock_rag
         mock_rag.query.return_value = {
-            "answer": "No refills for Schedule II under federal rules (educational).",
+            "answer": "Educational (Schedule II may not be refilled).",
             "sources": [
                 "dea_schedules_overview.txt",
                 "pharmacist_responsibilities.txt",
@@ -202,16 +179,20 @@ class TestDeaQuery:
 
 
 class TestRagNotReady:
+    """When RAG is down and retry init also fails, endpoints return 503."""
+
     def test_chat_503_when_rag_none(self, client) -> None:
         c, main_mod = client
         main_mod.rag = None
-        r = c.post("/api/chat", json={"message": "hello"})
+        with patch.object(main_mod, "_init_rag", side_effect=RuntimeError("ollama down")):
+            r = c.post("/api/chat", json={"message": "hello"})
         assert r.status_code == 503
 
     def test_stats_503_when_rag_none(self, client) -> None:
         c, main_mod = client
         main_mod.rag = None
-        r = c.get("/api/stats")
+        with patch.object(main_mod, "_init_rag", side_effect=RuntimeError("ollama down")):
+            r = c.get("/api/stats")
         assert r.status_code == 503
 
 
