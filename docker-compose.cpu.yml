@@ -1,0 +1,8 @@
+# CPU fallback when NVIDIA GPU is not available to Docker.
+# Used automatically by scripts/run.sh when preflight detects no GPU.
+services:
+  ollama:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=
+    # Clear GPU reservation from base compose
+    gpus: !reset null

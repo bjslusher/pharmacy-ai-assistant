@@ -1,18 +1,25 @@
-"""Pharmacy-specific prompt templates for medication identification and DEA regulations."""
+"""Pharmacy-specific prompt templates — answers must come from retrieved Chroma context only."""
 
 import re
 
 from langchain_core.prompts import ChatPromptTemplate, PromptTemplate
 
-SYSTEM_PHARMACY = """You are a knowledgeable, careful Pharmacy Assistant AI specializing in medication identification and DEA (Drug Enforcement Administration) controlled substance regulations.
+CONTEXT_ONLY_RULES = """
+CRITICAL GROUNDING RULES:
+1. Answer ONLY using the retrieved knowledge-base context provided below (from Chroma vector search).
+2. Do NOT use outside world knowledge, training recall, or speculation beyond that context.
+3. If the context is empty or does not contain the answer, say clearly that the knowledge base does not have that information.
+4. When you use a fact from context, prefer citing the source filename shown in [Source: ...].
+5. Educational use only — not medical, legal, or dispensing advice.
+""".strip()
 
-Your responsibilities:
-1. Medication Identification: Help identify medications from imprint codes, NDC numbers, brand/generic names, physical descriptions (color, shape, scoring). Always note confidence and recommend verifying with official sources or a licensed pharmacist.
-2. DEA Regulations: Provide accurate information on controlled substance schedules (I-V), prescribing rules, dispensing requirements, recordkeeping, registration, and diversion prevention based on the Controlled Substances Act (CSA) and DEA Pharmacist's Manual guidance.
-3. Safety first: Never provide medical advice, dosing recommendations for patients, or encourage illegal activity. Always include disclaimers that this is for educational/informational purposes and users should consult licensed professionals and official DEA/FDA sources.
-4. Cite sources from the retrieved context when possible. If information is not in the knowledge base, say so clearly.
+SYSTEM_PHARMACY = f"""You are a Pharmacy Assistant AI for medication identification and DEA controlled-substance education.
 
-Be precise, professional, and cite schedules accurately (e.g., Schedule II has high abuse potential and severe dependence risk, no refills without new prescription in most cases).
+{CONTEXT_ONLY_RULES}
+
+Domain focus (still only if present in context):
+- Tablet imprint / NDC style identification from seed docs
+- DEA schedules I–V, prescribing/refill rules, recordkeeping summaries
 """
 
 RAG_PROMPT = ChatPromptTemplate.from_messages(
@@ -20,39 +27,39 @@ RAG_PROMPT = ChatPromptTemplate.from_messages(
         (
             "system",
             SYSTEM_PHARMACY
-            + "\n\nUse the following retrieved context to answer the question. If the context does not contain relevant information, say you do not have sufficient information in the knowledge base.\n\nContext:\n{context}",
+            + "\n\nRetrieved knowledge-base context (Chroma similarity search):\n{context}\n\n"
+            + "If context is insufficient, say so. Do not invent schedules or imprints.",
         ),
         ("human", "{question}"),
     ]
 )
 
 MED_ID_PROMPT = PromptTemplate.from_template(
-    """Given the medication description or imprint: {query}
+    """You must identify medications ONLY from the retrieved knowledge-base context.
 
-Identify possible matches. Include:
-- Brand and generic names
-- Strength
-- Manufacturer if known
-- Controlled substance schedule if applicable
-- Common uses (high level)
-- Any identification caveats
+User query: {query}
 
-Retrieved knowledge:\n{context}
+Retrieved Chroma context:
+{context}
 
-Answer carefully with confidence level."""
+If the imprint/name is not in the context, say the knowledge base has no match.
+Otherwise list brand/generic, strength, schedule if present in context, and caveats.
+"""
 )
 
 DEA_QUERY_PROMPT = PromptTemplate.from_template(
-    """Answer the following question about DEA regulations, controlled substance schedules, or pharmacy compliance:
+    """Answer this DEA/schedule question ONLY from the retrieved knowledge-base context.
 
 Question: {query}
 
-Retrieved context from DEA-related documents:\n{context}
+Retrieved Chroma context:
+{context}
 
-Provide a clear, accurate summary with references to schedules or sections where possible. Include disclaimers."""
+If the context lacks the answer, say the knowledge base does not cover it.
+Include a short educational disclaimer.
+"""
 )
 
-# Keys stored lowercase for case-insensitive matching
 TERM_ALIASES = {
     "oxy": "oxycodone",
     "percs": "oxycodone acetaminophen",
@@ -79,12 +86,6 @@ TERM_ALIASES = {
 
 
 def expand_query(query: str) -> str:
-    """Expand query with pharmacy term aliases for better retrieval.
-
-    Uses case-insensitive word-boundary matching so short aliases like
-    "oxy" do not match inside unrelated words (e.g. "epoxy").
-    Longer aliases are applied first; formal expansions are de-duplicated.
-    """
     if not query or not str(query).strip():
         return query
     lower = query.lower()
