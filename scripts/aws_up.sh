@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Plan / apply / destroy - S3 + IAM + ALB + ASG. Preflight always first.
+# NOTE: Do NOT print the access box here during apply — run.sh prints it once at the end.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -77,18 +78,14 @@ case "$ACTION" in
     [[ -n "$LOGS" ]] && ui_ok "S3 logs bucket     $LOGS" || ui_warn "S3 logs bucket (no output)"
     [[ -n "$ASG" ]] && ui_ok "Auto Scaling Group $ASG" || ui_warn "Auto Scaling Group (no output)"
     [[ -n "$ALB" ]] && ui_ok "Application LB     $ALB" || ui_warn "ALB DNS (no output)"
+    [[ -n "$FE" ]] && ui_ok "AWS frontend URL   $FE" || true
+    [[ -n "$HEALTH" ]] && ui_ok "AWS health URL     $HEALTH" || true
 
-    ui_summary_box "STARTUP" \
+    ui_summary_box "AWS APPLY" \
       "${C_OK}✔${C_RST} Terraform apply succeeded" \
       "${C_OK}✔${C_RST} S3 / IAM / ALB / ASG present in state" \
       "${C_WARN}…${C_RST} EC2 user_data still booting Docker on instances"
-
-    # Always print access last - local is immediate; AWS after bootstrap
-    ui_access_box \
-      "http://localhost:3000" \
-      "http://localhost:8000/docs" \
-      "${FE:-}" \
-      "${HEALTH:-}"
+    # Access URLs are printed once by run.sh after this returns — not here
     ;;
   destroy)
     ui_section "Terraform destroy (ASG first - no replacement instances)"

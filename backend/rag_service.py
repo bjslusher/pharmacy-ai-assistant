@@ -1,9 +1,10 @@
-"""RAG service for Pharmacy AI Assistant — tuned for speed on local GPU Ollama."""
+"""RAG service for Pharmacy AI Assistant — Chroma is the ONLY knowledge source."""
 
 from __future__ import annotations
 
 import logging
 import os
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -24,16 +25,20 @@ CHROMA_PATH = Path(os.getenv("CHROMA_PATH", "./chroma_db"))
 CHUNK_SIZE = 900
 CHUNK_OVERLAP = 150
 
-# Speed-oriented defaults (override via env)
 DEFAULT_TOP_K = int(os.getenv("RAG_TOP_K", "3"))
 DEFAULT_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "350"))
 DEFAULT_NUM_CTX = int(os.getenv("OLLAMA_NUM_CTX", "2048"))
 DEFAULT_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
 
 
-class RAGServiceError(Exception):
-    """Typed RAG failure with API-friendly fields."""
+def _banner(msg: str) -> None:
+    """Loud console line for orchestrator / docker logs (stdout + logger)."""
+    line = f"[CHROMA] {msg}"
+    print(line, flush=True, file=sys.stdout)
+    logger.info("%s", msg)
 
+
+class RAGServiceError(Exception):
     def __init__(
         self,
         message: str,
@@ -71,18 +76,15 @@ class PharmacyRAG:
             chunk_overlap=CHUNK_OVERLAP,
             separators=["\n\n", "\n", ". ", " ", ""],
         )
-        logger.info(
-            "RAG config provider=%s model=%s top_k=%s num_predict=%s num_ctx=%s",
-            self.provider,
-            os.getenv("OLLAMA_MODEL", DEFAULT_MODEL),
-            self.top_k,
-            os.getenv("OLLAMA_NUM_PREDICT", DEFAULT_NUM_PREDICT),
-            os.getenv("OLLAMA_NUM_CTX", DEFAULT_NUM_CTX),
+        _banner(
+            f"RAG config provider={self.provider} model={os.getenv('OLLAMA_MODEL', DEFAULT_MODEL)} "
+            f"top_k={self.top_k} chroma_path={CHROMA_PATH}"
         )
 
     def _build_embeddings(self):
         model = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
         base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        _banner(f"Embedding model = {model} @ {base} (used to VECTORIZE docs into Chroma)")
         return OllamaEmbeddings(model=model, base_url=base)
 
     def _build_llm(self):
@@ -101,7 +103,6 @@ class PharmacyRAG:
         base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
         num_predict = int(os.getenv("OLLAMA_NUM_PREDICT", str(DEFAULT_NUM_PREDICT)))
         num_ctx = int(os.getenv("OLLAMA_NUM_CTX", str(DEFAULT_NUM_CTX)))
-        # keep_alive keeps the model loaded in VRAM between requests (GPU)
         return ChatOllama(
             model=model,
             base_url=base,
@@ -124,8 +125,11 @@ class PharmacyRAG:
             return None
 
     def ensure_index(self):
+        """Create or load ChromaDB. This is the ONLY knowledge store for RAG answers."""
+        _banner(f"ensure_index starting — path={CHROMA_PATH.resolve()}")
         try:
             CHROMA_PATH.mkdir(parents=True, exist_ok=True)
+            _banner(f"Chroma directory ready: {CHROMA_PATH.resolve()}")
         except OSError as e:
             raise RAGServiceError(
                 "Cannot create Chroma data directory",
@@ -141,15 +145,20 @@ class PharmacyRAG:
                     embedding_function=self.embeddings,
                     collection_name="pharmacy_docs",
                 )
-                if self.document_count() > 0:
-                    logger.info("Loaded existing Chroma index")
+                count = self.document_count()
+                if count > 0:
+                    _banner(
+                        f"LOADED existing Chroma index — collection=pharmacy_docs "
+                        f"documents/chunks={count} path={CHROMA_PATH.resolve()}"
+                    )
                     return
+                _banner("Existing Chroma dir was empty — will rebuild from source_data")
             except Exception as e:
-                logger.warning("Could not load existing index (will rebuild): %s", e)
+                _banner(f"Could not load existing index (will rebuild): {e}")
 
         docs = self._load_source_docs()
         if not docs:
-            logger.warning("No source documents found under %s", DATA_PATH)
+            _banner(f"WARNING: No source documents under {DATA_PATH} — empty Chroma store")
             try:
                 self.vectorstore = Chroma(
                     persist_directory=str(CHROMA_PATH),
@@ -165,22 +174,56 @@ class PharmacyRAG:
                 ) from e
             return
 
+        sources = sorted({d.metadata.get("source", "?") for d in docs})
+        _banner(f"Embedding {len(docs)} source file(s) into Chroma: {sources}")
         try:
             chunks = self.splitter.split_documents(docs)
+            _banner(f"Split into {len(chunks)} chunks — calling nomic-embed-text via Ollama…")
             self.vectorstore = Chroma.from_documents(
                 documents=chunks,
                 embedding=self.embeddings,
                 persist_directory=str(CHROMA_PATH),
                 collection_name="pharmacy_docs",
             )
-            logger.info("Indexed %d chunks from %d docs", len(chunks), len(docs))
+            final = self.document_count()
+            _banner(
+                f"INDEX BUILT — chunks={len(chunks)} stored={final} "
+                f"collection=pharmacy_docs path={CHROMA_PATH.resolve()}"
+            )
+            _banner("Chroma is now the ONLY knowledge source for RAG answers")
         except Exception as e:
             raise RAGServiceError(
-                "Failed to build vector index (is the embedding model available?)",
+                "Failed to build vector index (is nomic-embed-text pulled in Ollama?)",
                 code="INDEX_BUILD_FAILED",
                 detail=str(e),
                 http_status=503,
             ) from e
+
+    def index_status(self) -> dict[str, Any]:
+        """Telemetry for /api/health and orchestrator."""
+        count = self.document_count()
+        sources: list[str] = []
+        try:
+            if self.vectorstore is not None:
+                raw = self.vectorstore._collection.get(include=["metadatas"])
+                metas = raw.get("metadatas") or []
+                sources = sorted(
+                    {
+                        (m or {}).get("source", "unknown")
+                        for m in metas
+                        if isinstance(m, dict)
+                    }
+                )
+        except Exception as e:
+            logger.debug("index_status sources failed: %s", e)
+        return {
+            "path": str(CHROMA_PATH.resolve()),
+            "documents_indexed": count,
+            "sources": sources,
+            "embedding_model": os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"),
+            "collection": "pharmacy_docs",
+            "ready": count > 0,
+        }
 
     def _load_source_docs(self) -> list[Document]:
         docs: list[Document] = []
@@ -203,6 +246,7 @@ class PharmacyRAG:
                                     metadata={"source": p.name},
                                 )
                             )
+                            _banner(f"Loaded source file: {p.name} ({len(text)} chars)")
                     except OSError as e:
                         logger.warning("Skipping unreadable file %s: %s", p, e)
             if docs:
@@ -288,6 +332,7 @@ class PharmacyRAG:
             doc = Document(page_content=text, metadata={"source": path.name})
             chunks = self.splitter.split_documents([doc])
             self.vectorstore.add_documents(chunks)
+            _banner(f"Ingested upload {path.name} → {len(chunks)} chunks into Chroma")
             return len(chunks)
         except Exception as e:
             raise RAGServiceError(
@@ -302,7 +347,12 @@ class PharmacyRAG:
             return []
         k = k if k is not None else self.top_k
         try:
-            return self.vectorstore.similarity_search(query, k=k)
+            docs = self.vectorstore.similarity_search(query, k=k)
+            _banner(
+                f"RETRIEVE from Chroma k={k} hits={len(docs)} "
+                f"sources={[d.metadata.get('source') for d in docs]}"
+            )
+            return docs
         except Exception as e:
             logger.warning("Retrieval failed: %s", e)
             raise RAGServiceError(
@@ -323,7 +373,7 @@ class PharmacyRAG:
         )
         sources = list({d.metadata.get("source", "unknown") for d in docs})
         if not docs:
-            logger.info("No retrieved docs for query")
+            _banner("No Chroma hits for query — LLM will only see empty context")
 
         if self.mem0:
             try:
@@ -358,7 +408,6 @@ class PharmacyRAG:
         return chain.invoke(question)
 
     def _stream_chain(self, mode: str, question: str, context: str) -> Iterator[str]:
-        """Yield answer tokens as they are generated."""
         if mode == "med_id":
             chain = MED_ID_PROMPT | self.llm | StrOutputParser()
             yield from chain.stream({"query": question, "context": context})
@@ -428,7 +477,6 @@ class PharmacyRAG:
         session_id: str | None = None,
         mode: str = "general",
     ) -> Iterator[dict[str, Any]]:
-        """Yield dict events: {token}, then final {done, sources, answer}."""
         if not question or not str(question).strip():
             raise RAGServiceError(
                 "Empty question",
