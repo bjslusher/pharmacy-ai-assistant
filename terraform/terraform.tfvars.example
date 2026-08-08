@@ -1,12 +1,23 @@
 # Copy to terraform.tfvars (gitignored) or pass -var on the CLI.
 # Prefer: eval $(python3 scripts/detect_aws_profile.py --export) && bash scripts/aws_up.sh apply
+#
+# Defaults are Free Tier oriented (t3.micro, 30 GB gp3, small LLM).
 
-aws_region    = "us-east-1"
-# aws_profile = "brian"   # or "default"
-# key_name    = "your-ec2-keypair"   # create in EC2 console first for SSH
-instance_type = "t3.medium"
-root_volume_gb = 40
+aws_region     = "us-east-1"
+# aws_profile  = "brian"   # or "default"
+# key_name     = "your-ec2-keypair"   # create in EC2 console first for SSH
+
+# --- Free Tier (default) ---
+instance_type   = "t3.micro"
+root_volume_gb  = 30
+ollama_model    = "llama3.2:1b"
+ollama_embed_model = "nomic-embed-text"
 force_destroy_buckets = true
+
+# --- Paid / smoother demo (uncomment if free tier exhausted or demo is slow) ---
+# instance_type  = "t3.small"
+# root_volume_gb = 40
+# ollama_model   = "llama3"
 
 # Optional: lock SSH to your IP
 # allowed_ssh_cidrs = ["x.x.x.x/32"]
