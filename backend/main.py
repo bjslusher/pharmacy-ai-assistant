@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -59,6 +59,21 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     mode: str = Field(default="general", description="general | med_id | dea")
 
+    @field_validator("message")
+    @classmethod
+    def message_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("message must not be blank")
+        return v
+
+    @field_validator("mode")
+    @classmethod
+    def mode_allowed(cls, v: str) -> str:
+        allowed = {"general", "med_id", "dea"}
+        if v not in allowed:
+            raise ValueError(f"mode must be one of {sorted(allowed)}")
+        return v
+
 
 class ChatResponse(BaseModel):
     answer: str
@@ -76,13 +91,18 @@ class HealthResponse(BaseModel):
     llm_provider: str
 
 
-@app.get("/health", response_model=HealthResponse)
-def health():
+def _health_payload() -> HealthResponse:
     return HealthResponse(
         status="healthy",
         documents_indexed=rag.document_count() if rag else 0,
         llm_provider=os.getenv("LLM_PROVIDER", "ollama"),
     )
+
+
+@app.get("/health", response_model=HealthResponse)
+@app.get("/api/health", response_model=HealthResponse)
+def health():
+    return _health_payload()
 
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -109,14 +129,15 @@ def chat(req: ChatRequest):
 
 @app.post("/api/meds/identify", response_model=ChatResponse)
 def identify_medication(req: ChatRequest):
-    req.mode = "med_id"
-    return chat(req)
+    # Force med_id mode without mutating caller unexpectedly beyond this request
+    forced = req.model_copy(update={"mode": "med_id"})
+    return chat(forced)
 
 
 @app.post("/api/dea/query", response_model=ChatResponse)
 def dea_query(req: ChatRequest):
-    req.mode = "dea"
-    return chat(req)
+    forced = req.model_copy(update={"mode": "dea"})
+    return chat(forced)
 
 
 @app.post("/api/ingest")
@@ -124,6 +145,8 @@ async def ingest(file: UploadFile = File(...)):
     if not rag:
         raise HTTPException(503, "RAG not ready")
     content = await file.read()
+    if not content:
+        raise HTTPException(400, "Empty file")
     path = rag.save_upload(file.filename or "upload.txt", content)
     count = rag.ingest_file(path)
     return {"status": "ok", "chunks_added": count, "filename": file.filename}
