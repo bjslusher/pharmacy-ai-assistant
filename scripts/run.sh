@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # =============================================================================
 # Pharmacy AI Assistant — one-command orchestrator
+#
+# Every long path runs preflight FIRST (fail-fast):
+#   local Docker  → scripts/preflight.sh local
+#   AWS           → scripts/preflight.sh aws  (→ aws_preflight.sh)
+#
 # Usage:
-#   bash scripts/run.sh                # local Docker stack
+#   bash scripts/run.sh                 # preflight local + start Docker stack
+#   bash scripts/run.sh preflight       # local checks only
+#   bash scripts/run.sh preflight all   # local + AWS
 #   bash scripts/run.sh stop|status|logs|test
-#   bash scripts/run.sh aws            # AWS preflight + terraform plan
-#   bash scripts/run.sh aws preflight  # AWS checks only (seconds)
-#   bash scripts/run.sh aws apply      # preflight + apply
-#   bash scripts/run.sh aws destroy
+#   bash scripts/run.sh aws             # AWS preflight + terraform plan
+#   bash scripts/run.sh aws preflight|plan|apply|destroy
 # =============================================================================
 set -euo pipefail
 
@@ -19,7 +24,6 @@ if ! docker compose version >/dev/null 2>&1; then
   if command -v docker-compose >/dev/null 2>&1; then
     COMPOSE=(docker-compose)
   else
-    # Only required for local docker commands — AWS path has its own checks
     COMPOSE=()
   fi
 fi
@@ -29,6 +33,15 @@ OLLAMA_EMBED_MODEL="${OLLAMA_EMBED_MODEL:-nomic-embed-text}"
 FRONTEND_URL="${FRONTEND_URL:-http://localhost:3000}"
 BACKEND_URL="${BACKEND_URL:-http://localhost:8000}"
 HEALTH_URL="${HEALTH_URL:-http://localhost:8000/api/health}"
+
+run_preflight() {
+  local mode="${1:-local}"
+  if [[ ! -f "$ROOT/scripts/preflight.sh" ]]; then
+    echo "ERROR: missing scripts/preflight.sh" >&2
+    exit 1
+  fi
+  bash "$ROOT/scripts/preflight.sh" "$mode"
+}
 
 ensure_env() {
   if [[ ! -f backend/.env ]]; then
@@ -72,20 +85,18 @@ pull_models() {
   fi
 }
 
-require_docker() {
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "ERROR: docker not found" >&2
-    exit 1
-  fi
+require_compose() {
   if [[ ${#COMPOSE[@]} -eq 0 ]]; then
-    echo "ERROR: Docker Compose not found" >&2
+    echo "ERROR: Docker Compose not available (preflight should have caught this)" >&2
     exit 1
   fi
 }
 
 cmd_start() {
-  echo "=== Pharmacy AI Assistant — starting local Docker stack ==="
-  require_docker
+  echo "=== Pharmacy AI Assistant — orchestrated start ==="
+  run_preflight local
+  echo
+  require_compose
   ensure_env
   echo "=== Building and starting containers ==="
   "${COMPOSE[@]}" up --build -d
@@ -99,17 +110,18 @@ cmd_start() {
   echo "  Backend:   $BACKEND_URL/docs"
   echo "  Health:    $HEALTH_URL"
   echo "=============================================="
-  echo "AWS path (separate): bash scripts/run.sh aws preflight"
+  echo "AWS:  bash scripts/run.sh aws preflight"
+  echo "Stop: bash scripts/run.sh stop"
 }
 
 cmd_stop() {
-  require_docker
+  require_compose
   echo "=== Stopping stack ==="
   "${COMPOSE[@]}" down
 }
 
 cmd_status() {
-  require_docker
+  require_compose
   echo "=== Containers ==="
   "${COMPOSE[@]}" ps || true
   echo
@@ -118,11 +130,13 @@ cmd_status() {
 }
 
 cmd_logs() {
-  require_docker
+  require_compose
   "${COMPOSE[@]}" logs -f --tail=200
 }
 
 cmd_test() {
+  echo "=== Preflight (local tools) ==="
+  run_preflight local || true
   echo "=== Backend tests ==="
   if [[ -d backend/.venv ]]; then
     # shellcheck disable=SC1091
@@ -138,22 +152,39 @@ cmd_test() {
 
 cmd_aws() {
   local sub="${1:-plan}"
-  # Always go through aws_up.sh which sources preflight first
-  bash "$ROOT/scripts/aws_up.sh" "$sub"
+  case "$sub" in
+    preflight|check)
+      run_preflight aws
+      ;;
+    plan|apply|destroy|output)
+      # aws_up.sh runs aws_preflight again internally before terraform
+      bash "$ROOT/scripts/aws_up.sh" "$sub"
+      ;;
+    *)
+      echo "Usage: bash scripts/run.sh aws [preflight|plan|apply|destroy|output]" >&2
+      exit 1
+      ;;
+  esac
+}
+
+cmd_preflight() {
+  local mode="${1:-local}"
+  run_preflight "$mode"
 }
 
 usage() {
-  sed -n '2,14p' "$0"
+  sed -n '2,18p' "$0"
 }
 
 case "${1:-start}" in
-  start|up|run) cmd_start ;;
-  stop|down)    cmd_stop ;;
-  status)       cmd_status ;;
-  logs)         cmd_logs ;;
-  test)         cmd_test ;;
-  aws)          shift || true; cmd_aws "${1:-plan}" ;;
-  help|-h|--help) usage ;;
+  start|up|run)     cmd_start ;;
+  stop|down)        cmd_stop ;;
+  status)           cmd_status ;;
+  logs)             cmd_logs ;;
+  test)             cmd_test ;;
+  preflight|check)  shift || true; cmd_preflight "${1:-local}" ;;
+  aws)              shift || true; cmd_aws "${1:-plan}" ;;
+  help|-h|--help)   usage ;;
   *)
     echo "Unknown command: $1" >&2
     usage
