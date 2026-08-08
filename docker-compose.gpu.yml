@@ -1,0 +1,8 @@
+# Overlay: enable NVIDIA GPU for the ollama service.
+# Applied by scripts/run.sh when user chooses GPU (and hardware is available).
+services:
+  ollama:
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    gpus: all
